@@ -167,3 +167,211 @@ pure_japanese_script: ひらがな、カタカナ、漢字のみで構成され�
 ライセンス
 MIT License
 Use code with caution.
+
+## Tests
+```
+[完全トークン検証] 文字: 'こ'
+  バイト列: b'\xe3\x81\x93'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[部分トークン検証] 文字: 'こ' (partial)
+  バイト列: b'\xe3\x81'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+.[多文字トークン検証] トークン: 'あA'
+  フルバイト列: b'\xe3\x81\x82A'
+  フルの結果（期待: False）: False
+  部分バイト列: b'\xe3\x81\x82'
+  期待値: True (部分で 'あ' が得られる)
+  実際値: True
+  アサーション成功
+
+.
+----------------------------------------------------------------------
+Ran 10 tests in 3.285s
+
+OK (skipped=4)
+(Llama4-Token-Editor-JP) root@e086bf4f0c6a:/workspace/sigrid/Llama4-Token-
+Editor-JP# python test.py^C
+(Llama4-Token-Editor-JP) root@e086bf4f0c6a:/workspace/sigrid/Llama4-Token-
+Editor-JP# vim test2.py
+(Llama4-Token-Editor-JP) root@e086bf4f0c6a:/workspace/sigrid/Llama4-Token-
+Editor-JP# vim test11.py
+(Llama4-Token-Editor-JP) root@e086bf4f0c6a:/workspace/sigrid/Llama4-Token-
+Editor-JP# python test11.py
+[setUpClass] 元の vocab_size: 200000
+モデル読み込みエラー: property 'vocab_size' of 'PreTrainedTokenizerFast' object has no setter
+ssss[is_japanese_related_char] テスト対象: 'あ'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_japanese_related_char] テスト対象: 'ア'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_japanese_related_char] テスト対象: '漢'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_japanese_related_char] テスト対象: '。'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_japanese_related_char] テスト対象: 'A'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+[is_japanese_related_char] テスト対象: '1'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+.[is_pure_japanese_script_char] テスト対象: 'あ'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_pure_japanese_script_char] テスト対象: 'ア'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_pure_japanese_script_char] テスト対象: '漢'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_pure_japanese_script_char] テスト対象: '。'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+[is_pure_japanese_script_char] テスト対象: 'A'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+.[is_special_char_pattern] テスト対象: '!!!'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_special_char_pattern] テスト対象: '@#$'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[is_special_char_pattern] テスト対象: 'abc'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+[is_special_char_pattern] テスト対象: 'あいう'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+[is_special_char_pattern] テスト対象: ''
+  期待値: False
+  実際値: False
+  アサーション成功
+
+.[ASCII多文字トークン検証] トークン: 'AB'
+  部分バイト列: b'A'
+  期待値: False (ASCII 'A' は日本語ではない)
+  実際値: False
+  アサーション成功
+
+.[完全トークン検証] 文字: 'あ'
+  バイト列: b'\xe3\x81\x82'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[部分トークン検証] 文字: 'あ' (partial: 末尾1バイト削除)
+  バイト列: b'\xe3\x81'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+[完全トークン検証] 文字: 'い'
+  バイト列: b'\xe3\x81\x84'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[部分トークン検証] 文字: 'い' (partial: 末尾1バイト削除)
+  バイト列: b'\xe3\x81'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+[完全トークン検証] 文字: 'う'
+  バイト列: b'\xe3\x81\x86'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[部分トークン検証] 文字: 'う' (partial: 末尾1バイト削除)
+  バイト列: b'\xe3\x81'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+[完全トークン検証] 文字: 'え'
+  バイト列: b'\xe3\x81\x88'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[部分トークン検証] 文字: 'え' (partial: 末尾1バイト削除)
+  バイト列: b'\xe3\x81'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+[完全トークン検証] 文字: 'お'
+  バイト列: b'\xe3\x81\x8a'
+  期待値: True
+  実際値: True
+  アサーション成功
+
+[部分トークン検証] 文字: 'お' (partial: 末尾1バイト削除)
+  バイト列: b'\xe3\x81'
+  期待値: False
+  実際値: False
+  アサーション成功
+
+.[多文字トークン検証] トークン: 'あい'
+  フルバイト列: b'\xe3\x81\x82\xe3\x81\x84'
+  期待値 (フル): False (全体は2文字)
+  実際値 (フル): False
+  部分バイト列: b'\xe3\x81\x82'
+  期待値 (部分): True (先頭で 'あ' が得られる)
+  実際値 (部分): True
+  アサーション成功
+
+.[単一文字検証] 文字: 'あ'
+  フルバイト列: b'\xe3\x81\x82'
+  期待値 (フル): True
+  実際値 (フル): True
+  部分バイト列（全体と同じ）: b'\xe3\x81\x82'
+  期待値 (部分): True
+  実際値 (部分): True
+  アサーション成功
+
+.
+----------------------------------------------------------------------
+Ran 11 tests in 3.499s
+
+OK (skipped=4)
+```

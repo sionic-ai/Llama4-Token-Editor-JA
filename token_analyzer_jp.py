@@ -289,7 +289,7 @@ def main():
     )
     parser.add_argument('--model_id', type=str, required=True,
                         help="分析対象のモデルのHugging Face IDまたはローカルパス。")
-    parser.add_argument('--min_token_id', type=int, default=0,
+    parser.add_argument('--min_token_id', type=int, default=102,
                         help="分析範囲の最小トークンID (デフォルト: 0)。特殊トークンは常に除外されます。")
     parser.add_argument('--output_dir', type=str, default='.',
                         help="分析結果 (JSONおよびTXTリスト) を保存するディレクトリ。")
