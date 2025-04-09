@@ -1,753 +1,574 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import unittest
-import logging
-import transformers
-import os
-import random  # サンプル抽出に使用
-from token_analyzer_jp import (
-    # 利用するヘルパー関数
-    is_japanese_related_char,
-    is_pure_japanese_script_char,
-    is_special_char_pattern,
-    # メイン分析関数
-    analyze_token_categories,
-    # 定義された文字セット（分類ロジック再現のため）
-    HIRAGANA,
-    KATAKANA,
-    KATAKANA_HW,
-    KANJI_COMMON,
-    KANJI_EXT_A,
-    JP_PUNCT,
-    JP_SYMBOLS_ETC,
-    JP_FULLWIDTH_ASCII_PRINTABLE,
-    ENGLISH_BASIC,
-)
 
-# テスト実行中のログレベル設定 (必要に応じて変更)
-# logging.disable(logging.CRITICAL) # ログを抑制する場合
+"""
+日本語用トークナイザーアナライザー
+上位のSlack議論で提示された「日本語文字に関わる全範囲（ひらがな、カタカナ全角・半角、漢字（基本～拡張B-F）、全角英数字、CJK互換漢字など）」を
+できる限り網羅するように改修した完全版のコードです。
+
+すべての注釈・コメントは日本語のみを使用し、韓国語その他言語は含んでいません。
+記号や変数名の英語表記（例: tokenizer, vocab_size）はPythonの一般的慣習として残していますが、
+説明やコメントはすべて日本語で記載しています。
+"""
+
+import os
+import json
+import logging
+import argparse
+from typing import Dict, List, Set, Any
+from tqdm import tqdm
+import transformers
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)  # INFOレベル以上を表示
+)
 
-# --- 定数 ---
-TARGET_MODEL_ID = "unsloth/Llama-4-Scout-17B-16E-Instruct"
-MIN_TEST_TOKEN_ID = 102
-MAX_SAMPLES_PER_CATEGORY = 5
-TOTAL_SAMPLES_FOR_LOGIC_TEST = 50
+# =========================================================================
+# ここから先は日本語文字判定用のユニコード範囲を定義します。
+# Slackで挙がった話題をすべて含めるため、下記のように広範に設定しています。
+# =========================================================================
+
+# ひらがな (U+3040 ~ U+309F)
+HIRAGANA = set(chr(c) for c in range(0x3040, 0x30A0))
+
+# 全角カタカナ (U+30A0 ~ U+30FF)
+KATAKANA = set(chr(c) for c in range(0x30A0, 0x3100))
+
+# 半角カタカナ (U+FF65 ~ U+FF9F)
+KATAKANA_HW = set(chr(c) for c in range(0xFF65, 0xFFA0))
+
+# CJK統合漢字 (U+4E00 ~ U+9FFF)
+KANJI_COMMON = set(chr(c) for c in range(0x4E00, 0xA000))
+
+# CJK統合漢字拡張A (U+3400 ~ U+4DBF)
+KANJI_EXT_A = set(chr(c) for c in range(0x3400, 0x4DC0))
+
+# CJK統合漢字拡張B-F (U+20000 ~ U+2FA1F)
+# 本来は拡張B: 0x20000~0x2A6DF, C, D, E, F, 互換補助など複数範囲がありますが、
+# 簡易的にまとめて 0x20000 ~ 0x2FA1F とします。
+KANJI_EXT_B_TO_F = set(chr(c) for c in range(0x20000, 0x2FA20))
+
+# CJK互換漢字 (U+F900 ~ U+FAFF)
+KANJI_COMPAT = set(chr(c) for c in range(0xF900, 0xFB00))
+
+# 日本語でよく使われる句読点・記号 (全角・半角)
+JP_PUNCT = set("、。「」『』【】・（）：；？！｡｢｣､")
+JP_SYMBOLS_ETC = set("　〜・￥")
+
+# 全角ASCII印字可能文字 (U+FF01 ~ U+FF5E 程度)
+JP_FULLWIDTH_ASCII_PRINTABLE = set(chr(c) for c in range(0xFF01, 0xFF5F))
+
+# 全角数字 (U+FF10 ~ U+FF19)
+JP_FULLWIDTH_DIGITS = set(chr(c) for c in range(0xFF10, 0xFF1A))
+
+# 全角英大文字 (U+FF21 ~ U+FF3A), 全角英小文字 (U+FF41 ~ U+FF5A)
+JP_FULLWIDTH_LATIN_UPPER = set(chr(c) for c in range(0xFF21, 0xFF3B))
+JP_FULLWIDTH_LATIN_LOWER = set(chr(c) for c in range(0xFF41, 0xFF5B))
+JP_FULLWIDTH_LATIN = JP_FULLWIDTH_LATIN_UPPER | JP_FULLWIDTH_LATIN_LOWER
+
+# 基本的な英語文字セット (ASCII a-z, A-Z)
+ENGLISH_LOWER = set(chr(c) for c in range(ord("a"), ord("z") + 1))
+ENGLISH_UPPER = set(chr(c) for c in range(ord("A"), ord("Z") + 1))
+ENGLISH_BASIC = ENGLISH_LOWER | ENGLISH_UPPER
+
+# =========================================================================
+# 日本語関連文字かどうかを判定するためのヘルパー関数
+# =========================================================================
 
 
-# --- ユーティリティ関数 (分類ロジック再現用ヘルパー) ---
-def _calculate_token_flags_util(decoded_token):
-    """トークン文字列から文字種フラグを計算する (ユーティリティ関数版)"""
-    flags = {
-        "has_hiragana": False,
-        "has_katakana_full": False,
-        "has_katakana_half": False,
-        "has_kanji": False,
-        "has_jp_punct_symbol": False,
-        "has_fullwidth_ascii": False,
-        "has_basic_english": False,
-        "has_digit": False,
-        "has_other_char": False,
-        "all_pure_jp_script": True,
-        "all_basic_english": True,
-        "is_related_to_jp": False,
+def is_japanese_related_char(char: str) -> bool:
+    """
+    文字が日本語の関連文字（ひらがな、カタカナ(全角/半角)、漢字(基本～拡張B-F, 互換)、
+    全角英数字、全角記号、主要句読点など）に該当するかを判定します。
+    """
+    if (
+        char in HIRAGANA
+        or char in KATAKANA
+        or char in KATAKANA_HW
+        or char in KANJI_COMMON
+        or char in KANJI_EXT_A
+        or char in KANJI_EXT_B_TO_F
+        or char in KANJI_COMPAT
+        or char in JP_PUNCT
+        or char in JP_SYMBOLS_ETC
+        or char in JP_FULLWIDTH_ASCII_PRINTABLE
+        or char in JP_FULLWIDTH_DIGITS
+        or char in JP_FULLWIDTH_LATIN
+    ):
+        return True
+    return False
+
+
+def is_pure_japanese_script_char(char: str) -> bool:
+    """
+    文字が厳密に「日本語の書記体系（ひらがな、カタカナ(全角/半角)、漢字）」のみを構成するか判定。
+    記号や全角英数字は含まない。
+    """
+    if (
+        char in HIRAGANA
+        or char in KATAKANA
+        or char in KATAKANA_HW
+        or char in KANJI_COMMON
+        or char in KANJI_EXT_A
+        or char in KANJI_EXT_B_TO_F
+        or char in KANJI_COMPAT
+    ):
+        return True
+    return False
+
+
+def is_special_char_pattern(token: str) -> bool:
+    """
+    トークンが下記に該当しない文字のみで構成されるかを判定:
+      - ASCII英数字 (isalnum)
+      - スペース (isspace)
+      - 日本語関連文字 (is_japanese_related_char)
+      - 基本英語 (ENGLISH_BASIC)
+    これらのいずれにも当てはまらない文字だけで構成されていれば True。
+    """
+    if not token:
+        return False
+
+    for c in token:
+        if c.isalnum():
+            return False
+        if c.isspace():
+            return False
+        if c in ENGLISH_BASIC:
+            return False
+        if is_japanese_related_char(c):
+            return False
+    return True
+
+
+# =========================================================================
+# トークンの分析メインロジック
+# =========================================================================
+
+
+def analyze_token_categories(model_id: str, min_token_id: int = 0) -> Dict[str, Any]:
+    """
+    指定モデルのトークナイザーをロードし、min_token_id 以上の通常トークンを解析して
+    各種カテゴリに仕分けし、その結果を返す。
+    特殊トークンは対象外。
+    """
+    logging.info(f"分析開始: {model_id}")
+    try:
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            model_id, trust_remote_code=True
+        )
+    except Exception as e:
+        logging.error(f"トークナイザー読み込み失敗: {e}")
+        return {}
+
+    vocab_size = tokenizer.vocab_size
+    max_token_id = vocab_size - 1
+
+    special_ids = set(tokenizer.all_special_ids)
+    common_special_tokens = {
+        tokenizer.bos_token_id,
+        tokenizer.eos_token_id,
+        tokenizer.unk_token_id,
+        tokenizer.pad_token_id,
+        tokenizer.cls_token_id,
+        tokenizer.sep_token_id,
+        tokenizer.mask_token_id,
     }
-    if not decoded_token:
-        return flags
-    for char in decoded_token:
-        is_hira = char in HIRAGANA
-        is_kata_f = char in KATAKANA
-        is_kata_h = char in KATAKANA_HW
-        is_kanji = char in KANJI_COMMON or char in KANJI_EXT_A
-        is_jp_ps = char in JP_PUNCT or char in JP_SYMBOLS_ETC
-        is_fw_ascii = char in JP_FULLWIDTH_ASCII_PRINTABLE
-        is_basic_eng = char in ENGLISH_BASIC
-        is_digit_char = "0" <= char <= "9"
-        is_space = char.isspace()
-        if is_hira:
-            flags["has_hiragana"] = True
-        if is_kata_f:
-            flags["has_katakana_full"] = True
-        if is_kata_h:
-            flags["has_katakana_half"] = True
-        if is_kanji:
-            flags["has_kanji"] = True
-        if is_jp_ps:
-            flags["has_jp_punct_symbol"] = True
-        if is_fw_ascii:
-            flags["has_fullwidth_ascii"] = True
-        if is_basic_eng:
-            flags["has_basic_english"] = True
-        if is_digit_char:
-            flags["has_digit"] = True
-        is_pure_jp = is_hira or is_kata_f or is_kata_h or is_kanji
-        if not is_pure_jp:
-            flags["all_pure_jp_script"] = False
-        if not is_basic_eng:
-            flags["all_basic_english"] = False
-        is_jp_related_char_flag = is_pure_jp or is_jp_ps or is_fw_ascii
-        if is_jp_related_char_flag:
-            flags["is_related_to_jp"] = True
-        is_potentially_special = not (
-            char.isalnum()
-            or is_space
-            or is_jp_related_char_flag
-            or is_basic_eng
-            or is_digit_char
+    for sid in common_special_tokens:
+        if sid is not None:
+            special_ids.add(sid)
+
+    logging.info(f"語彙サイズ: {vocab_size}")
+    logging.info(f"特殊トークン数: {len(special_ids)}")
+
+    categories: Dict[str, Set[int]] = {
+        "contains_japanese": set(),
+        "pure_japanese_script": set(),
+        "pure_english": set(),
+        "contains_hiragana": set(),
+        "contains_katakana_full": set(),
+        "contains_katakana_half": set(),
+        "contains_kanji": set(),
+        "contains_jp_punct_symbol": set(),
+        "contains_fullwidth_ascii": set(),
+        "contains_basic_english": set(),
+        "contains_digit": set(),
+        "special_char_pattern": set(),
+        "uncategorized": set(),
+    }
+
+    targets = [
+        tid
+        for tid in range(vocab_size)
+        if (tid >= min_token_id and tid not in special_ids)
+    ]
+    if not targets:
+        logging.warning(
+            "分析対象トークンがありません。min_token_idの設定を確認してください。"
         )
-        if is_potentially_special:
-            if not is_special_char_pattern(char):
-                flags["has_other_char"] = True
-    return flags
-
-
-def _calculate_expected_categories_util(decoded_token):
-    """分類ロジックに基づき、トークンが属すべきカテゴリのセットを計算する (ユーティリティ関数版)"""
-    if not decoded_token:
-        return set()
-    flags = _calculate_token_flags_util(decoded_token)
-    expected_cats = set()
-    if flags["is_related_to_jp"]:
-        expected_cats.add("contains_japanese")
-    if flags["has_hiragana"]:
-        expected_cats.add("contains_hiragana")
-    if flags["has_katakana_full"]:
-        expected_cats.add("contains_katakana_full")
-    if flags["has_katakana_half"]:
-        expected_cats.add("contains_katakana_half")
-    if flags["has_kanji"]:
-        expected_cats.add("contains_kanji")
-    if flags["has_jp_punct_symbol"]:
-        expected_cats.add("contains_jp_punct_symbol")
-    if flags["has_fullwidth_ascii"]:
-        expected_cats.add("contains_fullwidth_ascii")
-    if flags["all_pure_jp_script"] and (
-        flags["has_hiragana"]
-        or flags["has_katakana_full"]
-        or flags["has_katakana_half"]
-        or flags["has_kanji"]
-    ):
-        expected_cats.add("pure_japanese_script")
-    if flags["has_basic_english"]:
-        expected_cats.add("contains_basic_english")
-    if flags["all_basic_english"] and not flags["is_related_to_jp"]:
-        expected_cats.add("pure_english")
-    if flags["has_digit"]:
-        expected_cats.add("contains_digit")
-    is_sp_pattern = is_special_char_pattern(decoded_token)
-    if (
-        not flags["is_related_to_jp"]
-        and not flags["has_basic_english"]
-        and not flags["has_digit"]
-        and is_sp_pattern
-    ):
-        expected_cats.add("special_char_pattern")
-    if (
-        not flags["is_related_to_jp"]
-        and not flags["has_basic_english"]
-        and not flags["has_digit"]
-        and not is_sp_pattern
-    ):
-        expected_cats.add("uncategorized")
-    return expected_cats
-
-
-# ----- ヘルパー関数の単体テストクラス -----
-class HelperFunctionTests(unittest.TestCase):
-    def test_is_japanese_related_charの拡張ケース(self):
-        test_cases = [
-            ("あ", True),
-            ("ア", True),
-            ("漢", True),
-            ("ー", True),
-            ("ｶ", True),
-            ("ﾟ", True),
-            ("。", True),
-            ("　", True),
-            ("・", True),
-            ("￥", True),
-            ("「", True),
-            ("､", True),
-            ("Ａ", True),
-            ("ｂ", True),
-            ("０", True),
-            ("！", True),
-            ("～", True),
-            ("A", False),
-            ("1", False),
-            ("$", False),
-            (" ", False),
-            ("\n", False),
-            ("α", False),
-        ]
-        for char, expected in test_cases:
-            with self.subTest(char=char, expected=expected):
-                actual = is_japanese_related_char(char)
-                self.assertEqual(
-                    actual,
-                    expected,
-                    f"文字 '{char}' (U+{ord(char):04X}) is_japanese_related_char",
-                )
-
-    def test_is_pure_japanese_script_charの拡張ケース(self):
-        test_cases = [
-            ("あ", True),
-            ("ア", True),
-            ("漢", True),
-            ("ｶ", True),
-            ("ー", True),
-            ("･", True),
-            ("﨑", False),
-            ("。", False),
-            ("　", False),
-            ("Ａ", False),
-            ("1", False),
-            (" ", False),
-            ("\n", False),
-        ]
-        for char, expected in test_cases:
-            with self.subTest(char=char, expected=expected):
-                actual = is_pure_japanese_script_char(char)
-                self.assertEqual(
-                    actual,
-                    expected,
-                    f"文字 '{char}' (U+{ord(char):04X}) is_pure_japanese_script_char",
-                )
-
-    def test_is_special_char_patternの拡張ケース(self):
-        test_cases = [
-            ("!!!", True),
-            ("@#$", True),
-            ("&&&", True),
-            ("+-*/", True),
-            ("---", True),
-            ("===", True),
-            ("abc", False),
-            ("あいう", False),
-            ("123", False),
-            ("ＡＢＣ", False),
-            ("カタカナ", False),
-            ("半角ｶﾅ", False),
-            ("漢字", False),
-            (" ", False),
-            ("　", False),
-            ("a#$", False),
-            ("#あ$", False),
-            ("#1$", False),
-            ("#Ａ$", False),
-            ("", False),
-            ("「」", False),
-            (" ---", False),
-            (" #", False),
-            (" 🔥", False),
-        ]
-        for token, expected in test_cases:
-            with self.subTest(token=repr(token), expected=expected):
-                actual = is_special_char_pattern(token)
-                self.assertEqual(
-                    actual, expected, f"トークン {repr(token)} is_special_char_pattern"
-                )
-
-
-# ----- 分類ロジックの単体テストクラス -----
-class LogicVerificationTests(unittest.TestCase):
-    def test_characteristic_patterns_logic(self):
-        """定義された特徴的なパターンについて、分類ロジックが正しく働くか検証する。"""
-        test_patterns = [
-            (
-                "半角カタカナ",
-                "ﾃｽﾄ",
-                "テスト",
-                {"contains_japanese", "contains_katakana_half", "pure_japanese_script"},
-                {"contains_katakana_full", "pure_english"},
-                "contains_katakana_half",
-            ),
-            (
-                "全角英字",
-                "ＡＢＣ",
-                "ABC",
-                {"contains_japanese", "contains_fullwidth_ascii"},
-                {"pure_japanese_script", "pure_english"},
-                "contains_fullwidth_ascii",
-            ),
-            (
-                "全角数字",
-                "１２３",
-                "123",
-                {"contains_japanese", "contains_fullwidth_ascii"},
-                {"pure_japanese_script", "pure_english", "contains_digit"},
-                "contains_fullwidth_ascii",
-            ),
-            (
-                "全角記号",
-                "％＆！",
-                "%&!",
-                {
-                    "contains_japanese",
-                    "contains_fullwidth_ascii",
-                    "contains_jp_punct_symbol",
-                },
-                {"pure_japanese_script", "pure_english"},
-                "contains_fullwidth_ascii",
-            ),
-            (
-                "純粋ひらがな",
-                "あいうえお",
-                "アイウエオ",
-                {"contains_japanese", "contains_hiragana", "pure_japanese_script"},
-                {"contains_katakana_full", "pure_english"},
-                "contains_hiragana",
-            ),
-            (
-                "純粋カタカナ(長音符含)",
-                "トークン",
-                "token",
-                {"contains_japanese", "contains_katakana_full", "pure_japanese_script"},
-                {"contains_hiragana", "pure_english"},
-                "contains_katakana_full",
-            ),
-            (
-                "純粋漢字",
-                "日本語",
-                "にほんご",
-                {"contains_japanese", "contains_kanji", "pure_japanese_script"},
-                {"contains_hiragana", "pure_english"},
-                "contains_kanji",
-            ),
-            (
-                "純粋英語",
-                "HelloWorld",
-                "ハローワールド",
-                {"contains_basic_english", "pure_english"},
-                {"contains_japanese"},
-                "pure_english",
-            ),
-            (
-                "特殊文字パターン",
-                "---",
-                "-abc-",
-                {"special_char_pattern"},
-                {"contains_japanese", "contains_basic_english", "contains_digit"},
-                "special_char_pattern",
-            ),
-            (
-                "半角カナ+英語",
-                "ﾃｽﾄABC",
-                "テストABC",
-                {
-                    "contains_japanese",
-                    "contains_katakana_half",
-                    "contains_basic_english",
-                },
-                {"pure_japanese_script", "pure_english"},
-                "contains_katakana_half",
-            ),
-            (
-                "漢字+数字(半角)",
-                "東京1",
-                "Tokyo1",
-                {"contains_japanese", "contains_kanji", "contains_digit"},
-                {"pure_japanese_script", "pure_english"},
-                "contains_kanji",
-            ),
-            (
-                "空白のみ",
-                "   ",
-                "abc",
-                {"uncategorized"},
-                {"contains_japanese", "contains_basic_english", "special_char_pattern"},
-                "uncategorized",
-            ),
-        ]
-        print("\n--- 特徴パターンの分類ロジック検証 ---")
-        for (
-            description,
-            positive_example,
-            negative_example,
-            expected_cats_positive,
-            excluded_cats_positive,
-            neg_excluded_subcat,
-        ) in test_patterns:
-            with self.subTest(description=description, type="ポジティブ"):
-                print(f"  検証: '{description}' - ポジティブ例 '{positive_example}'")
-                calculated_cats = _calculate_expected_categories_util(positive_example)
-                self.assertSetEqual(
-                    calculated_cats,
-                    expected_cats_positive,
-                    f"'{positive_example}' のカテゴリ不一致",
-                )
-                for excluded_cat in excluded_cats_positive:
-                    self.assertNotIn(
-                        excluded_cat,
-                        calculated_cats,
-                        f"'{positive_example}' は '{excluded_cat}' に含まれるべきでない",
-                    )
-            if negative_example:
-                with self.subTest(description=description, type="ネガティブ"):
-                    print(
-                        f"  検証: '{description}' - ネガティブ例 '{negative_example}'"
-                    )
-                    calculated_cats_neg = _calculate_expected_categories_util(
-                        negative_example
-                    )
-                    if neg_excluded_subcat:
-                        self.assertNotIn(
-                            neg_excluded_subcat,
-                            calculated_cats_neg,
-                            f"ネガティブ例 '{negative_example}' はカテゴリ '{neg_excluded_subcat}' に含まれるべきでない",
-                        )
-
-
-# ----- メイン分析関数の統合テストクラス -----
-class AnalysisIntegrationTests(unittest.TestCase):
-    tokenizer = None
-    result = None
-    stats = {}
-    token_ids_by_category = {}
-    token_ids_by_category_sets = {}
-    details = {}
-
-    @classmethod
-    def setUpClass(cls):
-        print(f"\n--- {cls.__name__} セットアップ開始 ---")
-        print(f"テスト対象モデル: {TARGET_MODEL_ID}")
-        # --- クラス変数を初期化 ---
-        cls.tokenizer = None
-        cls.result = None
-        cls.stats = {}
-        cls.token_ids_by_category = {}
-        cls.token_ids_by_category_sets = {}
-        cls.details = {}
-        try:
-            cls.tokenizer = transformers.AutoTokenizer.from_pretrained(
-                TARGET_MODEL_ID, trust_remote_code=True
-            )
-            print(f"トークナイザー ({cls.tokenizer.__class__.__name__}) のロード完了")
-            print(f"トークン分析を開始します (min_token_id={MIN_TEST_TOKEN_ID})...")
-            cls.result = analyze_token_categories(
-                TARGET_MODEL_ID, min_token_id=MIN_TEST_TOKEN_ID
-            )
-            print("トークン分析完了")
-            # --- 結果が正常な場合のみ後続の変数を設定 ---
-            if cls.result is not None:
-                cls.stats = cls.result.get("statistics", {})
-                cls.token_ids_by_category = cls.result.get("token_ids", {})
-                cls.token_ids_by_category_sets = {
-                    name: set(ids) for name, ids in cls.token_ids_by_category.items()
-                }
-                cls.details = cls.result.get(
-                    "analysis_details", {}
-                )  # {} をデフォルトに
-                # analysis_details が空でないことも確認してからログ出力
-                if cls.details:
-                    print(
-                        f"分析対象トークン数: {cls.details.get('num_tokens_analyzed', 0):,}"
-                    )
-                else:
-                    print("警告: analysis_details が結果に含まれていません。")
-                    # details が必須であればここでエラーにするか検討
-                    # raise RuntimeError("analysis_details が分析結果に含まれていません")
-            else:
-                raise RuntimeError("analyze_token_categories が None を返しました")
-        except Exception as e:
-            print(
-                f"\n****** セットアップ中に致命的なエラー ******\nエラータイプ: {type(e).__name__}\nエラーメッセージ: {e}"
-            )
-            import traceback
-
-            print(traceback.format_exc())
-            print("***********************************\n")
-            cls.result = None  # Ensure result is None on error
-        finally:
-            print(f"--- {cls.__name__} セットアップ完了 ---")
-
-    def test_分析結果の基本構造と必須キーの存在確認(self):
-        if self.result is None:
-            self.fail("セットアップ失敗")
-            return
-        self.assertEqual(self.result["model_id"], TARGET_MODEL_ID)
-        self.assertIsInstance(self.result["vocab_size"], int)
-        self.assertGreaterEqual(self.result["vocab_size"], 0)
-        self.assertIsInstance(self.result["num_special_tokens"], int)
-        self.assertGreaterEqual(self.result["num_special_tokens"], 0)
-        expected_top_keys = [
-            "model_id",
-            "vocab_size",
-            "num_special_tokens",
-            "analysis_details",
-            "statistics",
-            "token_ids",
-        ]
-        [self.assertIn(key, self.result) for key in expected_top_keys]
-        # --- details の存在とキーのチェックを修正 ---
-        self.assertIn(
-            "analysis_details", self.result, "analysis_details キーが結果にありません"
-        )
-        # self.details は setUpClass で {} に初期化される可能性があるため、None チェックは不要
-        self.assertIsInstance(
-            self.details, dict, "analysis_details が辞書ではありません"
-        )
-        # details が空でないことをチェック (setUpClass で None でないことが保証されていれば)
-        self.assertTrue(
-            self.details, "analysis_details が空の辞書です (分析失敗の可能性)"
-        )  # 空の場合は失敗させる
-
-        expected_detail_keys = [
-            "min_token_id_analyzed",
-            "max_token_id_analyzed",
-            "num_tokens_analyzed",
-            "num_errors",
-            "excluded_special_ids",
-        ]
-        for key in expected_detail_keys:
-            self.assertIn(key, self.details, f"details にキー '{key}' がありません")
-        self.assertIsInstance(self.details.get("excluded_special_ids", []), list)
-        # --- 修正ここまで ---
-        self.assertIsInstance(self.stats, dict)
-        self.assertIsInstance(self.token_ids_by_category, dict)
-        expected_category_keys = {
-            "contains_japanese",
-            "pure_japanese_script",
-            "pure_english",
-            "contains_hiragana",
-            "contains_katakana_full",
-            "contains_katakana_half",
-            "contains_kanji",
-            "contains_jp_punct_symbol",
-            "contains_fullwidth_ascii",
-            "contains_basic_english",
-            "contains_digit",
-            "special_char_pattern",
-            "uncategorized",
+        return {
+            "model_id": model_id,
+            "vocab_size": vocab_size,
+            "num_special_tokens": len(special_ids),
+            "analysis_details": {
+                "min_token_id_analyzed": min_token_id,
+                "max_token_id_analyzed": max_token_id,
+                "num_tokens_analyzed": 0,
+                "num_errors": 0,
+                "excluded_special_ids": sorted(list(special_ids)),
+            },
+            "statistics": {k: 0 for k in categories},
+            "token_ids": {k: [] for k in categories},
         }
-        self.assertEqual(set(self.stats.keys()), expected_category_keys)
-        self.assertEqual(set(self.token_ids_by_category.keys()), expected_category_keys)
-        self.assertGreaterEqual(self.details.get("num_tokens_analyzed", -1), 0)
-        if self.details.get("num_tokens_analyzed", 0) == 0:
-            logging.warning("分析対象トークン数が0でした。")
 
-    def test_カテゴリ間の部分集合関係の検証(self):
-        if self.result is None:
-            self.fail("セットアップ失敗")
-            return
-
-        def check_subset(sub, super_):
-            sub_set = self.token_ids_by_category_sets.get(sub, set())
-            super_set = self.token_ids_by_category_sets.get(super_, set())
-            self.assertTrue(
-                sub_set.issubset(super_set), f"'{sub}' ⊆ '{super_}'"
-            ) if sub_set or super_set else None
-
-        check_subset("pure_japanese_script", "contains_japanese")
-        check_subset("contains_hiragana", "contains_japanese")
-        check_subset("contains_katakana_full", "contains_japanese")
-        check_subset("contains_katakana_half", "contains_japanese")
-        check_subset("contains_kanji", "contains_japanese")
-        check_subset("contains_jp_punct_symbol", "contains_japanese")
-        check_subset("contains_fullwidth_ascii", "contains_japanese")
-        check_subset("pure_english", "contains_basic_english")
-        pure_jp_set = self.token_ids_by_category_sets.get("pure_japanese_script", set())
-        jp_ps_set = self.token_ids_by_category_sets.get(
-            "contains_jp_punct_symbol", set()
-        )
-        fw_ascii_set = self.token_ids_by_category_sets.get(
-            "contains_fullwidth_ascii", set()
-        )
-        if pure_jp_set and jp_ps_set:
-            self.assertTrue(
-                pure_jp_set.isdisjoint(jp_ps_set - pure_jp_set),
-                "pure_jp と jp_punct_symbol(のみ) は排他",
-            )
-        if pure_jp_set and fw_ascii_set:
-            self.assertTrue(
-                pure_jp_set.isdisjoint(fw_ascii_set - pure_jp_set),
-                "pure_jp と fw_ascii(のみ) は排他",
-            )
-
-    def test_カテゴリ間の排他関係の検証(self):
-        if self.result is None:
-            self.fail("セットアップ失敗")
-            return
-
-        def check_disjoint(cat1, cat2):
-            s1 = self.token_ids_by_category_sets.get(cat1, set())
-            s2 = self.token_ids_by_category_sets.get(cat2, set())
-            if s1 and s2:
-                intersection = s1.intersection(s2)
-                if intersection:
-                    sample_size = 5
-                    int_list = sorted(list(intersection))
-                    samples = int_list[:sample_size]
-                    num_common = len(int_list)
-                    msg = f"排他検証失敗: '{cat1}'∩'{cat2}'={num_common} 個共通\n サンプル:{samples}"
-                    if self.tokenizer:
-                        try:
-                            decoded = [
-                                f"{t}:{repr(self.tokenizer.decode([t], clean_up_tokenization_spaces=False))}"
-                                for t in samples
-                            ]
-                            msg += f"\n デコード例:{decoded}"
-                        except Exception as e:
-                            msg += f"\n (デコードエラー:{e})"
-                    self.fail(msg)
-
-        check_disjoint("pure_japanese_script", "pure_english")
-        check_disjoint("pure_japanese_script", "special_char_pattern")
-        check_disjoint("pure_japanese_script", "uncategorized")
-        check_disjoint("pure_english", "contains_japanese")
-        check_disjoint("pure_english", "special_char_pattern")
-        check_disjoint("pure_english", "uncategorized")
-        check_disjoint("special_char_pattern", "contains_japanese")
-        check_disjoint("special_char_pattern", "contains_basic_english")
-        check_disjoint("special_char_pattern", "uncategorized")
-        if self.token_ids_by_category_sets.get("uncategorized", set()):
-            defined_cats = [
-                "contains_japanese",
-                "pure_japanese_script",
-                "pure_english",
-                "contains_hiragana",
-                "contains_katakana_full",
-                "contains_katakana_half",
-                "contains_kanji",
-                "contains_jp_punct_symbol",
-                "contains_fullwidth_ascii",
-                "contains_basic_english",
-                "contains_digit",
-                "special_char_pattern",
-            ]
-            for cat in defined_cats:
-                check_disjoint("uncategorized", cat)
-
-    def test_統計値の整合性検証(self):
-        if self.result is None:
-            self.fail("セットアップ失敗")
-            return
-        for name, count in self.stats.items():
-            self.assertEqual(
-                count,
-                len(self.token_ids_by_category.get(name, [])),
-                f"統計値不一致:{name}",
-            )
-        all_cat_ids = set().union(
-            *[
-                s
-                for n, s in self.token_ids_by_category_sets.items()
-                if n != "uncategorized"
-            ]
-        )
-        num_analyzed = self.details.get("num_tokens_analyzed", 0)
-        num_uncat = self.stats.get("uncategorized", 0)
-        num_cat_unique = len(all_cat_ids)
-        self.assertEqual(
-            num_analyzed,
-            num_cat_unique + num_uncat,
-            f"合計数不一致:分析={num_analyzed:,},分類済={num_cat_unique:,},未分類={num_uncat:,}",
-        )
-
-    def test_分類ロジックの一貫性検証_サンプル(self):
-        if self.result is None:
-            self.fail("セットアップ失敗")
-            return
-        if self.tokenizer is None:
-            self.fail("Tokenizer未ロード")
-            return
-        if self.details.get("num_tokens_analyzed", 0) == 0:
-            self.skipTest("分析対象なし")
-            return  # .get() 使用
-        sampled_ids = set()
-        cats_to_sample = [
-            "pure_japanese_script",
-            "pure_english",
-            "special_char_pattern",
-            "uncategorized",
-            "contains_katakana_half",
-            "contains_fullwidth_ascii",
-            "contains_jp_punct_symbol",
-            "contains_digit",
-        ]
-        for cat in cats_to_sample:
-            ids_cat = self.token_ids_by_category_sets.get(cat, set())
-            if ids_cat:
-                k = min(len(ids_cat), MAX_SAMPLES_PER_CATEGORY)
-                sampled_ids.update(random.sample(list(ids_cat), k))
-        final_ids = sorted(list(sampled_ids))
-        if len(final_ids) > TOTAL_SAMPLES_FOR_LOGIC_TEST:
-            final_ids = sorted(random.sample(final_ids, TOTAL_SAMPLES_FOR_LOGIC_TEST))
-        if not final_ids:
-            self.skipTest("検証サンプルIDなし")
-            return
-        print(f"\n--- 分類ロジック一貫性検証 (サンプルID数: {len(final_ids)}) ---")
-        for tid in final_ids:
-            try:
-                decoded = self.tokenizer.decode(
-                    [tid], clean_up_tokenization_spaces=False
-                )
-            except Exception as e:
-                self.fail(f"ID {tid} デコードエラー: {e}")
+    error_count = 0
+    for token_id in tqdm(targets, desc="トークン解析中", unit="token"):
+        try:
+            decoded = tokenizer.decode([token_id], clean_up_tokenization_spaces=False)
+            if not decoded:
                 continue
-            with self.subTest(tid=tid, decoded=repr(decoded)):
-                expected = _calculate_expected_categories_util(decoded)
-                actual = {
-                    name
-                    for name, ids_set in self.token_ids_by_category_sets.items()
-                    if tid in ids_set
-                }
-                self.assertSetEqual(
-                    actual, expected, f"ID {tid} ({repr(decoded)}) 分類ロジック不一致"
-                )
 
-    def test_partial_japanese_token_samples(self):
-        if self.result is None:
-            self.fail("セットアップ失敗")
-            return
-        if self.tokenizer is None:
-            self.fail("Tokenizer未ロード")
-            return
-        contains_jp = self.token_ids_by_category_sets.get("contains_japanese", set())
-        pure_jp = self.token_ids_by_category_sets.get("pure_japanese_script", set())
-        partial_mixed_ids = list(contains_jp - pure_jp)
-        if not partial_mixed_ids:
-            self.skipTest("Partial/Mixed候補なし")
-            return
-        num_samples = min(len(partial_mixed_ids), TOTAL_SAMPLES_FOR_LOGIC_TEST)
-        sampled = sorted(random.sample(partial_mixed_ids, num_samples))
-        print(
-            f"\n--- Partial/Mixed日本語トークン検証 (サンプルID数: {len(sampled)}) ---"
+            has_hira = False
+            has_kata_f = False
+            has_kata_h = False
+            has_kanji = False
+            has_jp_punc = False
+            has_fw_ascii = False
+            has_basic_eng = False
+            has_digit_flag = False
+
+            all_pure_jp = True
+            all_basic_eng = True
+
+            for ch in decoded:
+                # カテゴリ判定フラグ
+                if ch in HIRAGANA:
+                    has_hira = True
+                if ch in KATAKANA:
+                    has_kata_f = True
+                if ch in KATAKANA_HW:
+                    has_kata_h = True
+                if (
+                    ch in KANJI_COMMON
+                    or ch in KANJI_EXT_A
+                    or ch in KANJI_EXT_B_TO_F
+                    or ch in KANJI_COMPAT
+                ):
+                    has_kanji = True
+                if (ch in JP_PUNCT) or (ch in JP_SYMBOLS_ETC):
+                    has_jp_punc = True
+                if (
+                    ch in JP_FULLWIDTH_ASCII_PRINTABLE
+                    or ch in JP_FULLWIDTH_DIGITS
+                    or ch in JP_FULLWIDTH_LATIN
+                ):
+                    has_fw_ascii = True
+                if ch in ENGLISH_BASIC:
+                    has_basic_eng = True
+                if "0" <= ch <= "9":
+                    has_digit_flag = True
+
+                # 純粋な日本語だけで構成されているか
+                if not is_pure_japanese_script_char(ch):
+                    all_pure_jp = False
+
+                # 純粋な英語だけで構成されているか
+                if ch not in ENGLISH_BASIC:
+                    all_basic_eng = False
+
+            # カテゴリ分類
+            is_jp_related = (
+                has_hira
+                or has_kata_f
+                or has_kata_h
+                or has_kanji
+                or has_jp_punc
+                or has_fw_ascii
+            )
+            if is_jp_related:
+                categories["contains_japanese"].add(token_id)
+                if has_hira:
+                    categories["contains_hiragana"].add(token_id)
+                if has_kata_f:
+                    categories["contains_katakana_full"].add(token_id)
+                if has_kata_h:
+                    categories["contains_katakana_half"].add(token_id)
+                if has_kanji:
+                    categories["contains_kanji"].add(token_id)
+                if has_jp_punc:
+                    categories["contains_jp_punct_symbol"].add(token_id)
+                if has_fw_ascii:
+                    categories["contains_fullwidth_ascii"].add(token_id)
+
+                if all_pure_jp and (has_hira or has_kata_f or has_kata_h or has_kanji):
+                    categories["pure_japanese_script"].add(token_id)
+
+            if has_basic_eng:
+                categories["contains_basic_english"].add(token_id)
+                if all_basic_eng and (not is_jp_related):
+                    categories["pure_english"].add(token_id)
+
+            if has_digit_flag:
+                categories["contains_digit"].add(token_id)
+
+            # 特殊文字パターン
+            if (
+                not is_jp_related
+                and not has_basic_eng
+                and not has_digit_flag
+                and is_special_char_pattern(decoded)
+            ):
+                categories["special_char_pattern"].add(token_id)
+
+        except Exception as e:
+            error_count += 1
+            if error_count <= 20:
+                logging.warning(f"トークンID {token_id} の解析中にエラー: {e}")
+            continue
+
+    # 未分類を特定
+    all_categorized = set()
+    for cname, cset in categories.items():
+        if cname == "uncategorized":
+            continue
+        all_categorized |= cset
+
+    uncategorized_set = set(targets) - all_categorized
+    categories["uncategorized"] = uncategorized_set
+
+    # 結果整理
+    analysis_result = {
+        "model_id": model_id,
+        "vocab_size": vocab_size,
+        "num_special_tokens": len(special_ids),
+        "analysis_details": {
+            "min_token_id_analyzed": min_token_id,
+            "max_token_id_analyzed": max_token_id,
+            "num_tokens_analyzed": len(targets),
+            "num_errors": error_count,
+            "excluded_special_ids": sorted(list(special_ids)),
+        },
+        "statistics": {k: len(v) for k, v in categories.items()},
+        "token_ids": {k: sorted(list(v)) for k, v in categories.items()},
+    }
+    return analysis_result
+
+
+# =========================================================================
+# 分析結果の保存・表示関数
+# =========================================================================
+
+
+def save_analysis_results(
+    analysis_result: Dict[str, Any],
+    output_dir: str = "token_analysis_output",
+    base_filename: str = "token_analysis_jp",
+):
+    """
+    JSONファイルとして分析結果を保存します。
+    """
+    if not analysis_result:
+        logging.error("分析結果がありません。保存をスキップします。")
+        return
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        model_name_part = (
+            os.path.basename(analysis_result["model_id"])
+            .replace("/", "_")
+            .replace("-", "_")
         )
-        for tid in sampled:
-            try:
-                decoded = self.tokenizer.decode(
-                    [tid], clean_up_tokenization_spaces=False
-                )
-            except Exception as e:
-                logging.warning(f"ID {tid} デコードエラー (Partial/Mixed検証): {e}")
-                continue
-            with self.subTest(tid=tid, decoded=repr(decoded)):
-                self.assertIn(
-                    tid,
-                    contains_jp,
-                    f"ID {tid} ({repr(decoded)}) は contains_japanese に含まれるべき",
-                )
-                self.assertNotIn(
-                    tid,
-                    pure_jp,
-                    f"ID {tid} ({repr(decoded)}) は pure_japanese_script に含まれないべき",
-                )
-                has_jp_flag = any(is_japanese_related_char(c) for c in decoded)
-                self.assertTrue(
-                    has_jp_flag,
-                    f"ID {tid} ({repr(decoded)}) は日本語関連文字を含むべき",
-                )
+        output_path = os.path.join(
+            output_dir, f"{base_filename}_{model_name_part}.json"
+        )
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(analysis_result, f, ensure_ascii=False, indent=2)
+        logging.info(f"JSON保存完了: {output_path}")
+    except Exception as e:
+        logging.error(f"JSON保存中にエラーが発生: {e}")
 
 
-# --- テスト実行 ---
+def save_token_list(
+    token_ids: List[int], category_name: str, output_dir: str, model_id: str
+):
+    """
+    指定カテゴリのトークンID一覧をテキストファイルに書き出します。
+    """
+    if not token_ids:
+        logging.info(
+            f"'{category_name}' に該当トークンがありません。保存をスキップします。"
+        )
+        return
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        model_name_part = os.path.basename(model_id).replace("/", "_").replace("-", "_")
+        filename = f"{category_name}_{model_name_part}.txt"
+        outpath = os.path.join(output_dir, filename)
+        with open(outpath, "w", encoding="utf-8") as f:
+            id_str = ",".join(str(i) for i in token_ids)
+            f.write(f"{category_name}_ids = [{id_str}]\n")
+        logging.info(
+            f"{len(token_ids)} 個の'{category_name}'トークンIDを保存しました: {outpath}"
+        )
+    except Exception as e:
+        logging.error(f"'{category_name}'トークンIDリストの保存中にエラー: {e}")
+
+
+def print_analysis_summary(analysis_result: Dict[str, Any]):
+    """
+    統計情報をコンソールに出力します。
+    """
+    if not analysis_result:
+        logging.warning("分析結果がありません。表示をスキップします。")
+        return
+
+    st = analysis_result["statistics"]
+    dt = analysis_result["analysis_details"]
+    print("\n==============================")
+    print(f"モデルID: {analysis_result['model_id']}")
+    print(f"語彙サイズ: {analysis_result['vocab_size']}")
+    print(f"特殊トークン数: {analysis_result['num_special_tokens']}")
+    print(f"解析対象トークン数: {dt['num_tokens_analyzed']}")
+    print(f"解析中エラー数: {dt['num_errors']}")
+    print("------------------------------")
+    print("カテゴリ別トークン数:")
+    print(f"  日本語関連: {st['contains_japanese']}")
+    print(f"     純粋日本語: {st['pure_japanese_script']}")
+    print(f"     ひらがな含む: {st['contains_hiragana']}")
+    print(f"     全角カタカナ含む: {st['contains_katakana_full']}")
+    print(f"     半角カタカナ含む: {st['contains_katakana_half']}")
+    print(f"     漢字含む: {st['contains_kanji']}")
+    print(f"     日本語句読点/記号含む: {st['contains_jp_punct_symbol']}")
+    print(f"     全角ASCII含む: {st['contains_fullwidth_ascii']}")
+    print(f"  基本英語含む: {st['contains_basic_english']}")
+    print(f"     純粋英語: {st['pure_english']}")
+    print(f"  数字含む: {st['contains_digit']}")
+    print(f"  特殊文字パターン: {st['special_char_pattern']}")
+    print(f"  未分類: {st['uncategorized']}")
+    print("==============================\n")
+
+
+def print_example_tokens(
+    model_id: str, category_name: str, token_ids: List[int], max_tokens: int = 10
+):
+    """
+    指定カテゴリのトークンIDを数件サンプル表示します。
+    """
+    if not token_ids:
+        print(f"\n--- {category_name} のトークン例 ---")
+        print("  該当トークンはありません。")
+        return
+
+    print(f"\n--- {category_name} のトークン例 (最大{max_tokens}件) ---")
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        model_id, trust_remote_code=True
+    )
+    for tid in token_ids[:max_tokens]:
+        try:
+            txt = tokenizer.decode([tid], clean_up_tokenization_spaces=False)
+            print(f"  ID: {tid:<6d} | Token: {repr(txt)}")
+        except Exception as e:
+            print(f"  ID: {tid:<6d} | デコード失敗: {e}")
+
+
+# =========================================================================
+# メインの処理フロー
+# =========================================================================
+
+
+def run_full_analysis(
+    model_id: str, min_token_id: int = 0, output_dir: str = "token_analysis_output"
+):
+    """
+    トークン解析のフルプロセス:
+      1) 解析実行
+      2) JSON結果保存
+      3) カテゴリ別トークンIDリスト保存
+      4) 統計表示
+      5) 例示表示
+    """
+    logging.info("=== トークン解析開始 ===")
+    logging.info(f"モデルID: {model_id}")
+    logging.info(f"最小トークンID: {min_token_id}")
+    logging.info(f"出力先ディレクトリ: {output_dir}")
+
+    result = analyze_token_categories(model_id, min_token_id)
+    if not result:
+        logging.error("解析結果が空です。処理を終了します。")
+        return
+
+    save_analysis_results(result, output_dir=output_dir)
+
+    token_ids_map = result["token_ids"]
+    categories_to_save = [
+        "contains_japanese",
+        "pure_japanese_script",
+        "contains_hiragana",
+        "contains_katakana_full",
+        "contains_katakana_half",
+        "contains_kanji",
+        "contains_fullwidth_ascii",
+        "pure_english",
+        "special_char_pattern",
+        "uncategorized",
+    ]
+    for cat in categories_to_save:
+        save_token_list(token_ids_map[cat], cat, output_dir, result["model_id"])
+
+    print_analysis_summary(result)
+
+    # 例表示を行うカテゴリ
+    example_targets = [
+        ("uncategorized", 15),
+        ("special_char_pattern", 15),
+        ("pure_japanese_script", 10),
+        ("contains_japanese", 10),
+        ("pure_english", 10),
+    ]
+    for cat_name, max_show in example_targets:
+        print_example_tokens(model_id, cat_name, token_ids_map[cat_name], max_show)
+
+    logging.info("=== トークン解析完了 ===")
+
+
+def main():
+    """
+    コマンドライン引数を処理し、分析を実行するスクリプトのエントリーポイント。
+    """
+    parser = argparse.ArgumentParser(
+        description="日本語トークナイザーアナライザー: 広範囲の日本語関連文字を含むトークンを分類し、統計を出力します。"
+    )
+    parser.add_argument(
+        "--model_id",
+        type=str,
+        required=True,
+        help="分析対象のモデル（ローカルパスまたはHugging FaceモデルID）",
+    )
+    parser.add_argument(
+        "--min_token_id", type=int, default=102, help="分析を開始する最小トークンID"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="token_analysis_output",
+        help="分析結果を保存するディレクトリ",
+    )
+    parser.add_argument(
+        "--log_level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="ログ出力レベル",
+    )
+    args = parser.parse_args()
+
+    logging.getLogger().setLevel(args.log_level.upper())
+
+    run_full_analysis(
+        model_id=args.model_id,
+        min_token_id=args.min_token_id,
+        output_dir=args.output_dir,
+    )
+
+
 if __name__ == "__main__":
-    suite = unittest.TestSuite()
-    suite.addTest(unittest.makeSuite(HelperFunctionTests))
-    suite.addTest(unittest.makeSuite(LogicVerificationTests))
-    suite.addTest(unittest.makeSuite(AnalysisIntegrationTests))
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-    # if not result.wasSuccessful(): exit(1) # CI用
+    main()
