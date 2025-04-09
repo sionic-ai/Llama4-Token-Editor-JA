@@ -255,8 +255,6 @@ class HelperFunctionTests(unittest.TestCase):
 class LogicVerificationTests(unittest.TestCase):
     def test_characteristic_patterns_logic(self):
         """定義された特徴的なパターンについて、分類ロジックが正しく働くか検証する。"""
-        # (説明, ポジティブ例, ネガティブ例, 期待カテゴリ(ポジティブ), 除外カテゴリ(ポジティブ), ネガティブ例で除外すべきサブカテゴリ)
-        # 説明部分を日本語に修正
         test_patterns = [
             (
                 "半角カタカナ",
@@ -415,6 +413,13 @@ class AnalysisIntegrationTests(unittest.TestCase):
     def setUpClass(cls):
         print(f"\n--- {cls.__name__} セットアップ開始 ---")
         print(f"テスト対象モデル: {TARGET_MODEL_ID}")
+        # --- クラス変数を初期化 ---
+        cls.tokenizer = None
+        cls.result = None
+        cls.stats = {}
+        cls.token_ids_by_category = {}
+        cls.token_ids_by_category_sets = {}
+        cls.details = {}
         try:
             cls.tokenizer = transformers.AutoTokenizer.from_pretrained(
                 TARGET_MODEL_ID, trust_remote_code=True
@@ -425,8 +430,8 @@ class AnalysisIntegrationTests(unittest.TestCase):
                 TARGET_MODEL_ID, min_token_id=MIN_TEST_TOKEN_ID
             )
             print("トークン分析完了")
-            if cls.result is None:
-                raise RuntimeError("analyze_token_categories が None")
+            # --- 結果が正常な場合のみ後続の変数を設定 ---
+            if cls.result is not None:
                 cls.stats = cls.result.get("statistics", {})
                 cls.token_ids_by_category = cls.result.get("token_ids", {})
                 cls.token_ids_by_category_sets = {
@@ -434,10 +439,18 @@ class AnalysisIntegrationTests(unittest.TestCase):
                 }
                 cls.details = cls.result.get(
                     "analysis_details", {}
-                )  # detailsがNoneにならないように修正
-            print(
-                f"分析対象トークン数: {cls.details.get('num_tokens_analyzed', 0):,}"
-            )  # .get()を使用
+                )  # {} をデフォルトに
+                # analysis_details が空でないことも確認してからログ出力
+                if cls.details:
+                    print(
+                        f"分析対象トークン数: {cls.details.get('num_tokens_analyzed', 0):,}"
+                    )
+                else:
+                    print("警告: analysis_details が結果に含まれていません。")
+                    # details が必須であればここでエラーにするか検討
+                    # raise RuntimeError("analysis_details が分析結果に含まれていません")
+            else:
+                raise RuntimeError("analyze_token_categories が None を返しました")
         except Exception as e:
             print(
                 f"\n****** セットアップ中に致命的なエラー ******\nエラータイプ: {type(e).__name__}\nエラーメッセージ: {e}"
@@ -446,7 +459,7 @@ class AnalysisIntegrationTests(unittest.TestCase):
 
             print(traceback.format_exc())
             print("***********************************\n")
-            cls.result = None
+            cls.result = None  # Ensure result is None on error
         finally:
             print(f"--- {cls.__name__} セットアップ完了 ---")
 
@@ -468,7 +481,19 @@ class AnalysisIntegrationTests(unittest.TestCase):
             "token_ids",
         ]
         [self.assertIn(key, self.result) for key in expected_top_keys]
-        self.assertIsInstance(self.details, dict)
+        # --- details の存在とキーのチェックを修正 ---
+        self.assertIn(
+            "analysis_details", self.result, "analysis_details キーが結果にありません"
+        )
+        # self.details は setUpClass で {} に初期化される可能性があるため、None チェックは不要
+        self.assertIsInstance(
+            self.details, dict, "analysis_details が辞書ではありません"
+        )
+        # details が空でないことをチェック (setUpClass で None でないことが保証されていれば)
+        self.assertTrue(
+            self.details, "analysis_details が空の辞書です (分析失敗の可能性)"
+        )  # 空の場合は失敗させる
+
         expected_detail_keys = [
             "min_token_id_analyzed",
             "max_token_id_analyzed",
@@ -476,17 +501,10 @@ class AnalysisIntegrationTests(unittest.TestCase):
             "num_errors",
             "excluded_special_ids",
         ]
-        # --- detailsが空でないことを確認してからキーをチェック ---
-        if self.details:  # detailsがNoneや空でない場合のみチェック
-            for key in expected_detail_keys:
-                self.assertIn(key, self.details, f"details にキー '{key}' がありません")
-            self.assertIsInstance(
-                self.details.get("excluded_special_ids", []), list
-            )  # .get() を使用
-        else:
-            self.fail(
-                "analysis_details が結果に含まれていません、または空です"
-            )  # detailsがなければ失敗
+        for key in expected_detail_keys:
+            self.assertIn(key, self.details, f"details にキー '{key}' がありません")
+        self.assertIsInstance(self.details.get("excluded_special_ids", []), list)
+        # --- 修正ここまで ---
         self.assertIsInstance(self.stats, dict)
         self.assertIsInstance(self.token_ids_by_category, dict)
         expected_category_keys = {
@@ -506,10 +524,7 @@ class AnalysisIntegrationTests(unittest.TestCase):
         }
         self.assertEqual(set(self.stats.keys()), expected_category_keys)
         self.assertEqual(set(self.token_ids_by_category.keys()), expected_category_keys)
-        # --- .get() を使用して安全にアクセス ---
-        self.assertGreaterEqual(
-            self.details.get("num_tokens_analyzed", -1), 0
-        )  # -1で初期化し、0以上かをチェック
+        self.assertGreaterEqual(self.details.get("num_tokens_analyzed", -1), 0)
         if self.details.get("num_tokens_analyzed", 0) == 0:
             logging.warning("分析対象トークン数が0でした。")
 
@@ -523,7 +538,7 @@ class AnalysisIntegrationTests(unittest.TestCase):
             super_set = self.token_ids_by_category_sets.get(super_, set())
             self.assertTrue(
                 sub_set.issubset(super_set), f"'{sub}' ⊆ '{super_}'"
-            ) if sub_set or super_set else None  # 空集合同士もTrueなのでチェック不要、どちらかあればチェック
+            ) if sub_set or super_set else None
 
         check_subset("pure_japanese_script", "contains_japanese")
         check_subset("contains_hiragana", "contains_japanese")
@@ -638,10 +653,9 @@ class AnalysisIntegrationTests(unittest.TestCase):
         if self.tokenizer is None:
             self.fail("Tokenizer未ロード")
             return
-        # --- .get() を使用して安全にアクセス ---
         if self.details.get("num_tokens_analyzed", 0) == 0:
             self.skipTest("分析対象なし")
-            return
+            return  # .get() 使用
         sampled_ids = set()
         cats_to_sample = [
             "pure_japanese_script",
