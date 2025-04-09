@@ -12,7 +12,7 @@ logging.basicConfig(
 
 
 # --- 日本語トークンID読み込み関数 (上記 adjust_japanese_bias.py と同様) ---
-def load_japanese_token_ids_from_json(json_path: str) -> List[int]:
+def load_japanese_token_ids_from_json(json_path: str) -> list[int]:
     """分析JSONファイルから日本語関連のトークンIDを読み込みます。"""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
@@ -33,7 +33,7 @@ def load_japanese_token_ids_from_json(json_path: str) -> List[int]:
         return []
 
 
-def load_japanese_token_ids_from_txt(txt_path: str) -> List[int]:
+def load_japanese_token_ids_from_txt(txt_path: str) -> list[int]:
     """生成されたTXTファイルから日本語トークンIDを読み込みます。"""
     try:
         with open(txt_path, "r", encoding="utf-8") as f:
