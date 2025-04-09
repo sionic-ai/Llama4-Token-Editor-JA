@@ -34,128 +34,85 @@ TARGET_MODEL_ID = "unsloth/Llama-4-Scout-17B-16E-Instruct"
 # テスト対象とするトークンIDの開始点 (特殊トークンを避ける)
 MIN_TEST_TOKEN_ID = 102
 # テストで検証する特定トークンIDの例 (モデル依存)
-# これらのIDは TARGET_MODEL_ID において期待されるカテゴリを持つものとする
-# 例: (ID, デコード文字列(参考), 期待されるカテゴリ(リスト), 期待されないカテゴリ(リスト))
-# 注意: モデル更新でIDが変わる可能性あり。テスト失敗時はIDを確認・更新する必要がある。
-#       スペースを含むトークンや特殊文字の分類はトークナイザー依存性が高い。
+# (ID, デコード文字列(参考), 期待されるカテゴリ(リスト), 期待されないカテゴリ(リスト))
 EXPECTED_TOKEN_CATEGORIES = [
     (
         30162,
         " 日本",
         ["contains_japanese", "contains_kanji"],
         ["pure_japanese_script", "pure_english"],
-    ),  # 先頭スペース + 漢字
-    (
-        31185,
-        "語",
-        ["contains_japanese", "contains_kanji", "pure_japanese_script"],
-        [],
-    ),  # 漢字のみ
+    ),
+    (31185, "語", ["contains_japanese", "contains_kanji", "pure_japanese_script"], []),
     (
         30088,
         "です",
         ["contains_japanese", "contains_hiragana", "pure_japanese_script"],
         [],
-    ),  # ひらがなのみ
+    ),
     (
         30472,
         "トークン",
         ["contains_japanese", "contains_katakana_full", "pure_japanese_script"],
         [],
-    ),  # 長音符「ー」もカタカナ範囲(U+30FC)に含まれるため pure
+    ),
     (
         105743,
         "ｶﾞ",
         ["contains_japanese", "contains_katakana_half", "pure_japanese_script"],
         [],
-    ),  # 半角カタカナ(濁点付き)
+    ),
     (
         30004,
         "、",
         ["contains_japanese", "contains_jp_punct_symbol"],
         ["pure_japanese_script"],
-    ),  # 句読点
+    ),
     (
         99796,
         "ＡＢＣ",
         ["contains_japanese", "contains_fullwidth_ascii"],
         ["pure_japanese_script"],
-    ),  # 全角英字
-    (
-        319,
-        " a",
-        ["contains_basic_english"],
-        ["pure_english", "contains_japanese"],
-    ),  # 先頭スペース + 英小文字
-    (
-        450,
-        " Apple",
-        ["contains_basic_english"],
-        ["pure_english", "contains_japanese"],
-    ),  # 先頭スペース + 英単語(大文字開始)
-    (
-        13,
-        " ",
-        [],
-        ["contains_japanese", "pure_english", "special_char_pattern"],
-    ),  # ID 13 は Llama 系でスペース -> special_idsに含まれるか要確認
-    (
-        29900,
-        " 123",
-        ["contains_digit"],
-        ["contains_japanese", "pure_english"],
-    ),  # 先頭スペース + 数字
-    (30587, " Code", ["contains_basic_english"], []),  # 先頭スペース + 英単語
+    ),
+    (319, " a", ["contains_basic_english"], ["pure_english", "contains_japanese"]),
+    (450, " Apple", ["contains_basic_english"], ["pure_english", "contains_japanese"]),
+    (13, " ", [], ["contains_japanese", "pure_english", "special_char_pattern"]),
+    (29900, " 123", ["contains_digit"], ["contains_japanese", "pure_english"]),
+    (30587, " Code", ["contains_basic_english"], []),
     (
         32100,
         "株式会社",
         ["contains_japanese", "contains_kanji", "pure_japanese_script"],
         [],
-    ),  # 会社名（漢字のみ）
+    ),
     (
         106324,
         "ChatGPT",
         ["contains_basic_english", "pure_english"],
         ["contains_japanese"],
-    ),  # 英単語（大文字小文字混在）
+    ),
     (
         125933,
         "・",
         ["contains_japanese", "contains_jp_punct_symbol"],
         ["pure_japanese_script"],
-    ),  # 中点
+    ),
     (
         30008,
         "「",
         ["contains_japanese", "contains_jp_punct_symbol"],
         ["pure_japanese_script"],
-    ),  # 鉤括弧開始
-    (100, "<0x00>", [], []),  # Llama4 ScoutでのID 100。特殊トークンとして除外されるはず
-    (2, "</s>", [], []),  # 特殊トークン
-    (
-        29871,
-        "\n",
-        [],
-        ["contains_japanese", "pure_english"],
-    ),  # 改行コード。スペース類似扱いか、特殊トークンか？
-    (
-        120128,
-        " #",
-        [],
-        ["contains_japanese", "special_char_pattern"],
-    ),  # スペース + 特殊文字 '#' -> Uncategorized?
-    (
-        127991,
-        " 🔥",
-        [],
-        ["contains_japanese", "special_char_pattern"],
-    ),  # スペース + 絵文字 -> Uncategorized?
+    ),
+    (100, "<0x00>", [], []),
+    (2, "</s>", [], []),
+    (29871, "\n", [], ["contains_japanese", "pure_english"]),
+    (120128, " #", [], ["contains_japanese", "special_char_pattern"]),
+    (127991, " 🔥", [], ["contains_japanese", "special_char_pattern"]),
     (
         12756,
-        " ---",
-        [],
-        ["contains_japanese", "contains_basic_english", "special_char_pattern"],
-    ),  # スペース + ハイフン -> Uncategorized?
+        "ovo",
+        ["contains_basic_english", "pure_english"],
+        ["contains_japanese", "special_char_pattern"],
+    ),  # 수정됨: 'ovo'는 pure_english
 ]
 
 
@@ -164,28 +121,23 @@ class HelperFunctionTests(unittest.TestCase):
     def test_is_japanese_related_charの拡張ケース(self):
         # 改善された is_japanese_related_char 関数をテスト
         test_cases = [
-            # 基本
             ("あ", True),
             ("ア", True),
             ("漢", True),
             ("ー", True),
-            # 半角カタカナ
             ("ｶ", True),
             ("ﾟ", True),
-            # 句読点・記号
             ("。", True),
             ("　", True),
             ("・", True),
             ("￥", True),
             ("「", True),
             ("､", True),
-            # 全角ASCII
             ("Ａ", True),
             ("ｂ", True),
             ("０", True),
             ("！", True),
             ("～", True),
-            # 非該当
             ("A", False),
             ("1", False),
             ("$", False),
@@ -205,15 +157,13 @@ class HelperFunctionTests(unittest.TestCase):
     def test_is_pure_japanese_script_charの拡張ケース(self):
         # 改善された is_pure_japanese_script_char 関数をテスト (期待値修正済み)
         test_cases = [
-            # 該当
             ("あ", True),
             ("ア", True),
             ("漢", True),
             ("ｶ", True),
-            ("ー", True),  # 長音符 (U+30FC) はカタカナ範囲内
-            ("･", True),  # 半角中点 (U+FF65) は半角カタカナ範囲の開始点
-            # 非該当
-            ("﨑", False),  # 互換漢字 (U+FA11) は定義範囲外
+            ("ー", True),
+            ("･", True),
+            ("﨑", False),
             ("。", False),
             ("　", False),
             ("Ａ", False),
@@ -231,16 +181,14 @@ class HelperFunctionTests(unittest.TestCase):
                 )
 
     def test_is_special_char_patternの拡張ケース(self):
-        # 改善された is_special_char_pattern 関数をテスト
+        # 改善された is_special_char_pattern 関数をテスト (期待値修正済み)
         test_cases = [
-            # 該当 (英数、空白、定義済み言語文字以外のみ)
             ("!!!", True),
             ("@#$", True),
             ("&&&", True),
             ("+-*/", True),
             ("---", True),
             ("===", True),
-            # 非該当 (何かが混ざっている)
             ("abc", False),
             ("あいう", False),
             ("123", False),
@@ -256,8 +204,8 @@ class HelperFunctionTests(unittest.TestCase):
             ("#Ａ$", False),
             ("", False),
             ("「」", False),
-            (" ---", False),  # スペースが含まれると False
-            (" #", False),  # スペースが含まれると False
+            (" ---", False),
+            (" #", False),
             (" 🔥", False),  # スペースが含まれると False
         ]
         for token, expected in test_cases:
@@ -272,9 +220,13 @@ class HelperFunctionTests(unittest.TestCase):
 
 # ----- メイン分析関数のテストクラス -----
 # 実際のモデルをロードして分析結果を検証
-# @unittest.skipUnless(os.path.exists(TARGET_MODEL_ID.split("/")[-1]) or os.path.exists(TARGET_MODEL_ID) or "HUGGINGFACE_HUB_TOKEN" in os.environ,
-#                   f"Requires local model at ./{TARGET_MODEL_ID.split('/')[-1]} or full path {TARGET_MODEL_ID}, or Hugging Face Hub token")
 class AnalysisResultTests(unittest.TestCase):
+    tokenizer = None  # クラス変数として tokenizer を保持
+    result = None
+    stats = {}
+    token_ids_by_category = {}
+    details = {}
+
     @classmethod
     def setUpClass(cls):
         # このクラスの全テスト実行前に一度だけ実行
@@ -323,7 +275,7 @@ class AnalysisResultTests(unittest.TestCase):
         # 主要なキーの存在確認
         self.assertEqual(self.result["model_id"], TARGET_MODEL_ID)
         self.assertIsInstance(self.result["vocab_size"], int)
-        self.assertGreaterEqual(self.result["vocab_size"], 0)  # 0以上であること
+        self.assertGreaterEqual(self.result["vocab_size"], 0)
         self.assertIsInstance(self.result["num_special_tokens"], int)
         self.assertGreaterEqual(self.result["num_special_tokens"], 0)
 
@@ -357,7 +309,7 @@ class AnalysisResultTests(unittest.TestCase):
             )
         self.assertIsInstance(self.details["excluded_special_ids"], list)
 
-        # statistics と token_ids のキー確認 (定義されたカテゴリと一致するか)
+        # statistics と token_ids のキー確認
         self.assertIsInstance(self.stats, dict)
         self.assertIsInstance(self.token_ids_by_category, dict)
         expected_category_keys = {
@@ -386,7 +338,6 @@ class AnalysisResultTests(unittest.TestCase):
             "token_ids のキーが期待されるカテゴリと一致しません",
         )
 
-        # 分析対象トークン数が0以上であること
         self.assertGreaterEqual(self.details["num_tokens_analyzed"], 0)
         if self.details["num_tokens_analyzed"] == 0:
             logging.warning(
@@ -398,18 +349,15 @@ class AnalysisResultTests(unittest.TestCase):
         if self.result is None:
             self.fail("セットアップ失敗のためテスト強制終了")
 
-        # 部分集合関係をチェックする関数
         def check_subset(subset_name, superset_name):
             subset_set = set(self.token_ids_by_category.get(subset_name, []))
             superset_set = set(self.token_ids_by_category.get(superset_name, []))
-            # 両方に要素がある場合のみチェック (空集合同士は常に部分集合)
             if subset_set and superset_set:
                 self.assertTrue(
                     subset_set.issubset(superset_set),
                     f"'{subset_name}' は '{superset_name}' の部分集合であるべきです",
                 )
 
-        # 日本語関連のチェック
         check_subset("pure_japanese_script", "contains_japanese")
         check_subset("contains_hiragana", "contains_japanese")
         check_subset("contains_katakana_full", "contains_japanese")
@@ -417,18 +365,14 @@ class AnalysisResultTests(unittest.TestCase):
         check_subset("contains_kanji", "contains_japanese")
         check_subset("contains_jp_punct_symbol", "contains_japanese")
         check_subset("contains_fullwidth_ascii", "contains_japanese")
-
-        # 英語関連のチェック
         check_subset("pure_english", "contains_basic_english")
 
-        # pure_japanese_script と他の日本語詳細カテゴリの関係
         pure_jp_set = set(self.token_ids_by_category.get("pure_japanese_script", []))
         jp_ps_set = set(self.token_ids_by_category.get("contains_jp_punct_symbol", []))
         fw_ascii_set = set(
             self.token_ids_by_category.get("contains_fullwidth_ascii", [])
         )
 
-        # pure_jp には句読点や全角ASCII「のみ」のトークンは含まれないはず
         if pure_jp_set and jp_ps_set:
             self.assertTrue(
                 pure_jp_set.isdisjoint(jp_ps_set - pure_jp_set),
@@ -445,32 +389,45 @@ class AnalysisResultTests(unittest.TestCase):
         if self.result is None:
             self.fail("セットアップ失敗のためテスト強制終了")
 
-        # 排他関係をチェックする関数
+        # 排他関係をチェックする関数 (失敗メッセージ改善版)
         def check_disjoint(cat1_name, cat2_name):
             set1 = set(self.token_ids_by_category.get(cat1_name, []))
             set2 = set(self.token_ids_by_category.get(cat2_name, []))
-            # 両方に要素がある場合のみチェック
-            if set1 and set2:
-                self.assertTrue(
-                    set1.isdisjoint(set2),
-                    f"カテゴリ '{cat1_name}' と '{cat2_name}' は排他であるべきです (共通要素: {set1.intersection(set2)})",
-                )
+            if set1 and set2:  # 両方に要素がある場合のみチェック
+                intersection = set1.intersection(set2)
+                if intersection:  # 共通要素が存在する場合のみ失敗させる
+                    sample_size = 5
+                    intersection_list = sorted(list(intersection))
+                    sample_elements = intersection_list[:sample_size]
+                    num_common = len(intersection_list)
+                    error_msg = (
+                        f"カテゴリ '{cat1_name}' と '{cat2_name}' は排他であるべきですが、"
+                        f"{num_common} 個の共通要素が見つかりました。\n"
+                        f"  共通要素サンプル (最大 {sample_size} 件): {sample_elements}"
+                    )
+                    # デコード例を追加 (Tokenizerがロード済みの場合)
+                    if self.tokenizer:
+                        try:
+                            decoded_samples = [
+                                f"{tid}:{repr(self.tokenizer.decode([tid], clean_up_tokenization_spaces=False))}"
+                                for tid in sample_elements
+                            ]
+                            error_msg += f"\n  デコード例: {decoded_samples}"
+                        except Exception as e:
+                            error_msg += f"\n  (デコード中にエラー: {e})"
+                    self.fail(error_msg)  # カスタムメッセージでテストを失敗させる
 
-        # 主要な排他関係のチェック
+        # --- 主要な排他関係のチェック ---
         check_disjoint("pure_japanese_script", "pure_english")
         check_disjoint("pure_japanese_script", "special_char_pattern")
         check_disjoint("pure_japanese_script", "uncategorized")
 
-        check_disjoint(
-            "pure_english", "contains_japanese"
-        )  # pure_english は日本語を含まない定義
+        check_disjoint("pure_english", "contains_japanese")
         check_disjoint("pure_english", "special_char_pattern")
         check_disjoint("pure_english", "uncategorized")
 
         check_disjoint("special_char_pattern", "contains_japanese")
-        check_disjoint(
-            "special_char_pattern", "contains_basic_english"
-        )  # contains_basic_english とも排他
+        check_disjoint("special_char_pattern", "contains_basic_english")
         check_disjoint("special_char_pattern", "uncategorized")
 
         # 未分類は他の「明確な」カテゴリとは排他
@@ -491,17 +448,20 @@ class AnalysisResultTests(unittest.TestCase):
                 "special_char_pattern",
             ]
             for cat_name in defined_categories:
+                # check_disjointは内部で空集合チェックするのでそのまま呼び出す
                 check_disjoint("uncategorized", cat_name)
 
     def test_特定トークンIDのカテゴリ所属検証(self):
         # セットアップが成功したか確認
         if self.result is None:
             self.fail("セットアップ失敗のためテスト強制終了")
+        if self.tokenizer is None:
+            self.fail("Tokenizerがロードされていません")  # Tokenizerも確認
 
         # 分析対象ID範囲と特殊IDを取得
-        min_id = self.details["min_token_id_analyzed"]
-        max_id = self.details["max_token_id_analyzed"]
-        special_ids_set = set(self.details["excluded_special_ids"])
+        min_id = self.details.get("min_token_id_analyzed", -1)  # 安全なデフォルト値
+        max_id = self.details.get("max_token_id_analyzed", -1)
+        special_ids_set = set(self.details.get("excluded_special_ids", []))
 
         # 事前定義リストを使って検証
         for (
@@ -522,7 +482,7 @@ class AnalysisResultTests(unittest.TestCase):
             except Exception as e:
                 actual_decoded = f"DECODE ERROR: {e}"
 
-            # subTestで個別のテストケースとして実行
+            # subTestで個別のテストケースとして実行 (不要なprint削除済み)
             with self.subTest(
                 token_id=token_id,
                 token_repr=repr(token_repr),
@@ -533,7 +493,7 @@ class AnalysisResultTests(unittest.TestCase):
                     self.assertIn(
                         cat_name,
                         self.token_ids_by_category,
-                        f"テストエラー: カテゴリ '{cat_name}' が結果に存在しません",
+                        f"テストエラー: カテゴリ '{cat_name}' が結果セットのキーに存在しません",
                     )
                     cat_set = set(self.token_ids_by_category.get(cat_name, []))
                     self.assertIn(
@@ -543,9 +503,7 @@ class AnalysisResultTests(unittest.TestCase):
                     )
                 # 非期待カテゴリへの非所属確認
                 for cat_name in not_expected_cats:
-                    if (
-                        cat_name in self.token_ids_by_category
-                    ):  # 結果にカテゴリキーが存在する場合のみチェック
+                    if cat_name in self.token_ids_by_category:
                         cat_set = set(self.token_ids_by_category[cat_name])
                         self.assertNotIn(
                             token_id,
@@ -572,8 +530,8 @@ class AnalysisResultTests(unittest.TestCase):
             if name != "uncategorized":
                 all_categorized_ids_union.update(ids)
 
-        num_analyzed = self.details["num_tokens_analyzed"]
-        num_uncategorized = self.stats["uncategorized"]
+        num_analyzed = self.details.get("num_tokens_analyzed", 0)
+        num_uncategorized = self.stats.get("uncategorized", 0)
         num_categorized_unique = len(all_categorized_ids_union)
 
         # 0件の場合も含めて等式が成り立つか検証
