@@ -1,377 +1,190 @@
-# 日本語トークンアナライザー & バイアスツール (Japanese Token Analyzer & Bias Tool)
+# Llama4 Token Editor（日本語バージョン）
 
-本ツールは、大規模言語モデル（LLM）のトークナイザーを分析し、特に日本語や英語などの言語がどのように扱われているかに焦点を当てるためのツールです。トークンをカテゴリ分類し、これらのカテゴリに基づいてトークンの生成確率（logit bias）を調整する方法の例を、ローカルでのHugging Face Transformers利用とOpenAI互換API利用の両方で提供します。
+**Llama4 Token Editor**は、大規模言語モデル（LLM）のトークナイザーを分析し、特定カテゴリーに属するトークンの重み（logits）を調整できるツールです。  
+もともと韓国語向けだった例をベースに、**日本語**（ひらがな・カタカナ（全角/半角）・漢字・全角英数字など）の解析を強化したバージョンとなっています。  
+Llama系を中心に、モデル内部のボキャブラリー（vocab）がどの程度日本語を扱っているかを調べて、必要に応じてログ確率（logits）バイアスを付与できます。
 
-元々は、Llama-4のような新しいモデルにおける日本語（または他言語）のトークン表現が、以前のモデルと比較してどのように改善されたかを評価するために使用されました。
+---
 
 ## 主な機能
 
--   **トークンカテゴリ分析**: モデルの語彙（特殊トークンを除く）を分析し、以下のカテゴリに分類します:
-    -   `pure_english`: 純粋な英語トークン（基本的なラテン文字のみ）
-    -   `contains_japanese`: 日本語関連文字（ひらがな、カタカナ、漢字、日本語の句読点/記号）を少なくとも1つ含むトークン
-    -   `pure_japanese_script`: 日本語のスクリプト文字（ひらがな、カタカナ、漢字）のみで構成されるトークン
-    -   `contains_digit`: 数字を含むトークン
-    -   `special_char_pattern`: 英数字、空白、言語文字以外の文字のみで構成されるトークン
-    -   `uncategorized`: 上記のいずれにも分類されないトークン
--   **Logit Biasの適用**: 生成に影響を与えるためにlogit biasを適用する方法を示します:
-    -   望ましいトークン（例：日本語トークン）の確率を増加させます。
-    -   望ましくないトークンの確率を減少させます。
--   **提供される例**:
-    -   Hugging Face `transformers` を使用したローカルでの生成 (`adjust_japanese_bias.py`)
-    -   `openai` ライブラリを使用したAPIベースの生成 (`openai_call_jp.py`) (OpenAI, OpenRouter等に対応)
-    -   vLLM統合のための概念的な例
+- **トークン分類解析**  
+  - モデル全体のボキャブラリーをスキャンし、以下のようなカテゴリに仕分けします：  
+    - `contains_japanese`：ひらがな/カタカナ（全角/半角）/漢字/全角ASCIIなど、日本語関連文字を1文字以上含む  
+    - `pure_japanese_script`：ひらがな・カタカナ・漢字のみで構成されたトークン  
+    - `contains_katakana_half`：半角カタカナを含むトークン  
+    - `contains_fullwidth_ascii`：全角数字/全角英字などを含むトークン  
+    - そのほか `pure_english`・`special_char_pattern`・`uncategorized` など  
+  - BPEで分割された**部分文字列**（例：UTF-8が途中で切れている場合）でも「日本語を形成する可能性」があればきちんと分類  
 
-## 分析テスト済みモデル例
+- **トークン重み付け（logitsバイアス）調整**  
+  - 解析結果として生成される `categorized_token_ids.txt` や `uncategorized_token_ids.txt` などのファイルを参照し、  
+    モデル推論時に特定トークンのスコアを上げたり下げたりできます。  
+  - 例：  
+    - 日本語トークンに+2.0のバイアスを与え、モデルが日本語単語を優先的に使うように誘導  
+    - 特殊文字パターンに-1.0のペナルティを付与し、不要な記号の多用を抑制 など  
 
-分析スクリプト (`token_analyzer_jp.py`) は、以下のトークナイザーでテストされています（ただし、他の多くのモデルにも適用可能です）:
-
--   `stabilityai/japanese-stablelm-instruct-gamma-7b` (**`trust_remote_code=True` が必要**)
--   `elyza/ELYZA-japanese-Llama-2-7b-instruct` (**`trust_remote_code=True` が必要**)
--   `mistralai/Mixtral-8x7B-Instruct-v0.1` (多言語モデルの例として)
--   `meta-llama/Meta-Llama-3.1-8B-Instruct` (多言語モデルの例として)
-
-使用例 (`adjust_japanese_bias.py`, `openai_call_jp.py`) は、様々なCausal LMモデルに適合させることができますが、モデルによっては `trust_remote_code=True` が必要になる場合があります。
-
-## 分析比較例（仮）
-
-以下の表は、異なるモデルのトークナイザーが日本語をどのように表現しているかの比較（非特殊トークン対象）の**概念的な例**を示しています。正確な数値を得るには、対象モデルで `token_analyzer_jp.py` を実行してください。
-
-*   **日本語を含む (`contains_japanese`)**: ひらがな、カタカナ、漢字、日本語の句読点/記号のいずれかを含むトークン。BPE（Byte Pair Encoding）において、これらの文字の一部が他の言語のトークンと共有されることがあります。
-*   **純粋な日本語スクリプト (`pure_japanese_script`)**: トークンがひらがな、カタカナ、漢字のみで構成されている（句読点や他の言語文字を含まない）。
-
-| 分析項目                     | Japanese StableLM (stabilityai) | ELYZA Llama2 (elyza) | Mixtral (mistralai) | Llama 3.1 (meta) |
-| :--------------------------- | :------------------------------ | :------------------- | :------------------ | :--------------- |
-| 語彙サイズ                   | ~32k                            | ~32k                 | ~32k                | ~128k            |
-| 特殊トークン数（除外）       | 数十                            | 数十                 | 数十                | ~256             |
-| 分析対象非特殊トークン数     | **~31k**                        | **~31k**             | ~31k                | ~128k            |
-| 純粋な英語トークン数         | **少ない**                      | **少ない**           | ~22k                | ~28k             |
-| 日本語を含むトークン数       | **多い**                        | **多い**             | 中程度              | 少ない           |
-| 純粋な日本語スクリプト数     | **中程度**                      | **中程度**           | 少ない              | 非常に少ない     |
-| 特殊文字パターントークン数   | ~1k                             | ~1k                  | ~1.5k               | ~2.5k            |
-| 未分類トークン数             | **少ない**                      | **少ない**           | ~3k                 | ~70k             |
-
-*(**注意:** 上記の数値は**例示**です。特に日本語特化モデル（StableLM, ELYZA）は、日本語トークンの数が多く、英語や未分類が少なくなる傾向があります。多言語モデル（Mixtral, Llama 3）は異なる分布を示します。正確な数値は `token_analyzer_jp.py` を実行して確認してください。)*
+---
 
 ## インストール
 
-1.  **リポジトリをクローン:**
-    ```bash
-    git clone https://github.com/your-username/Japanese-Token-Analyzer.git # 必要に応じてリポジトリURLを修正
-    cd Japanese-Token-Analyzer
-    ```
+```bash
+git clone https://github.com/sionic-ai/Llama4-Token-Editor-JP.git
+cd Llama4-Token-Editor-JP
+pip install -r requirements.txt
+```
 
-2.  **依存関係をインストール:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-    *   PyTorch は、ご使用の CUDA バージョンに合わせて別途インストールする必要がある場合があります。[PyTorch インストール手順](https://pytorch.org/get-started/locally/)を参照してください。
-    *   `device_map='auto'` や `'balanced'` を使用する場合は `accelerate` が必要です (`pip install accelerate`)。
-    *   モデルによっては追加の依存関係が必要な場合があります（例: `sentencepiece`）。モデルカードを確認してください。
+---
 
-## 使用方法
+## 使い方
 
-### 1. トークナイザー分析の実行
-
-`token_analyzer_jp.py` スクリプトを実行して、モデルのトークナイザーを分析し、カテゴリファイル（JSON と TXT）を生成します。
+### 1. トークン解析の実行
 
 ```bash
-# 例: Japanese StableLM Instruct Gamma 7B
-python token_analyzer_jp.py --model_id "stabilityai/japanese-stablelm-instruct-gamma-7b" --output_dir ./analysis_results_stablelm
+python token_analyzer_jp.py --model_id "モデルのパスまたはID"
+```
 
-# 例: ELYZA Japanese Llama 2 7B Instruct
-python token_analyzer_jp.py --model_id "elyza/ELYZA-japanese-Llama-2-7b-instruct" --output_dir ./analysis_results_elyza
-Use code with caution.
-Markdown
-パラメータ:
---model_id: Hugging Face モデルID またはモデル/トークナイザーへのローカルパス。(必須)
---min_token_id: 分析範囲の最小トークンID（デフォルト: 0）。特殊トークンは常に除外されます。
---output_dir: すべての出力ファイル（JSON と .txt リスト）を保存するディレクトリ（デフォルト: カレントディレクトリ）。
-出力ファイル (output_dir 内):
-token_analysis_jp_*.json: 詳細な分析結果（統計、除外された特殊IDリスト、分類された非特殊トークンIDリスト）。
-contains_japanese_*.txt: 「日本語を含む」トークンIDのリスト（日本語バイアス調整に有用）。
-pure_japanese_script_*.txt: 「純粋な日本語スクリプト」トークンIDのリスト。
-uncategorized_*.txt: 定義されたカテゴリに分類されなかった非特殊トークンIDのリスト。
-（その他、pure_english_*.txt なども生成されます）
-2. Logit Bias の適用 (ローカル実行例)
-adjust_japanese_bias.py を使用して、ローカルのHugging Faceモデルでテキストを生成し、分析出力から読み込んだ日本語トークンにバイアスを適用します。
-# まず、対象モデルでアナライザーを実行したことを確認してください:
-# python token_analyzer_jp.py --model_id "stabilityai/japanese-stablelm-instruct-gamma-7b" --output_dir .
+**主な引数**:
 
-# 次に、生成例を実行します:
-python adjust_japanese_bias.py \
-    --model_id "stabilityai/japanese-stablelm-instruct-gamma-7b" \
-    --prompt "日本の有名な観光地といえば、" \
-    --japanese_ids_file "./contains_japanese_japanese-stablelm-instruct-gamma-7b.txt" \
-    --japanese_bias 2.0 \
-    --max_length 60 \
-    --temperature 0.6
-Use code with caution.
-Bash
-adjust_japanese_bias.py の主な引数:
---model_id: 読み込むモデル（IDが正しく対応するように分析済みモデルと一致させる必要があります）。
---japanese_ids_file: 日本語トークンIDを含む .txt (または .json) ファイルへのパス。ファイル名はモデルによって異なります。アナライザーの出力に合わせてください。
---japanese_bias: 正の値は日本語の確率を増加させ、0はバイアスを無効にします。
---prompt: 入力テキスト。
-重要: stabilityai/japanese-stablelm-instruct-gamma-7b のようなモデルを使用するには trust_remote_code=True が必要になる場合があります。これはモデルリポジトリからコードを実行するため、信頼できるソースであることを確認してください。
-3. Logit Bias の適用 (OpenAI API 例)
-openai_call_jp.py を使用して、OpenAI互換API（OpenRouterなど）経由でテキストを生成し、日本語トークンにバイアスを適用します。
-# アナライザーから contains_japanese_*.txt ファイルがあることを確認してください。
-# APIキーを環境変数に設定します: export OPENROUTER_API_KEY="your-key"
+- `--min_token_id`：解析対象トークンIDの下限（デフォルト：102）  
+  通常0～101に特殊トークン（[CLS], [PAD]など）が多く含まれるため、誤ってそれらにバイアスを与えない目的で除外  
+- `--output_dir`：解析結果ファイルの出力先（デフォルト：`token_analysis_output`）
 
-python openai_call_jp.py \
-    --model_name "mistralai/mixtral-8x7b-instruct" `# APIプロバイダーでの正確なモデル名を確認` \
-    --prompt "日本のアニメでおすすめは？" \
-    --japanese_ids_file "./contains_japanese_mixtral-8x7b-instruct.txt" `# モデルに対応するファイル名` \
-    --japanese_bias 10.0 \
-    --max_tokens 80
-Use code with caution.
-Bash
-openai_call_jp.py の主な引数:
---model_name: APIプロバイダーで使用される正確なモデル識別子（例: OpenRouterでは異なる文字列である可能性があります）。プロバイダーのドキュメントで確認してください。
---api_key: APIキー（または OPENROUTER_API_KEY 環境変数）。
---base_url: APIエンドポイントURL。
---japanese_ids_file: 日本語IDを含む .txt (または .json) ファイルへのパス。ファイル名はモデルによって異なります。
---japanese_bias: バイアス値（OpenAI APIでは通常 -100 から 100）。
-4. vLLM 統合 (概念)
-vLLMのOpenAI互換エンドポイントを使用する場合の基本的な考え方は同じです:
-japanese_token_ids.txt などから目的のトークンID（例：日本語ID）を読み込みます。
-logit_bias 辞書を作成します（文字列のIDをバイアス値にマッピング）。
-vLLMの /v1/chat/completions エンドポイントへのAPIリクエストに logit_bias を含めます。
-# vLLM OpenAIエンドポイント利用の概念（サーバー改修またはクライアントリクエスト内）
+解析終了後、以下のようなファイルが生成されます：
 
-# 1. IDの読み込み (例: load_japanese_token_ids_from_txtを使用)
-# japanese_ids = load_japanese_token_ids_from_txt("contains_japanese_your_model.txt")
+1. **JSONファイル**（例：`token_analysis_jp_<モデル名>.json`）  
+   - カテゴリ別のトークン数、トークンID一覧、統計情報などを格納  
+2. **カテゴリ別テキストファイル**  
+   - `contains_japanese_<モデル名>.txt` や `pure_japanese_script_<モデル名>.txt` など  
+   - 中身はトークンIDのリストで、後ほどバイアス付与時に流用可能
 
-# 2. logit_bias辞書の作成
-# logit_bias_value = 20.0 # 例
-# logit_bias = {str(token_id): logit_bias_value for token_id in japanese_ids}
+---
 
-# 3. リクエストペイロードに含める (vLLMの /v1/chat/completions 呼び出し時)
-# request_payload = {
-#     "model": "your_deployed_model_name",
-#     "messages": [{"role": "user", "content": "日本の文化について教えてください。"}],
-#     "logit_bias": logit_bias,
-#     "max_tokens": 100,
-#     "temperature": 0.7
-# }
-# response = requests.post("http://your_vllm_server/v1/chat/completions", json=request_payload)
-Use code with caution.
-Python
-日本語トークン分析の原理
-このツールは、非特殊 トークンのデコードされた文字列を分析し、その文字のUnicodeプロパティに基づいて日本語文字を識別します:
-Unicode Range Checks: ひらがな (U+3040-U+309F)、カタカナ (U+30A0-U+30FF, U+FF65-U+FF9F)、一般的なCJK統合漢字 (U+4E00-U+9FFF, U+3400-U+4DBF)、および一般的な日本語の句読点や全角記号の範囲に基づいて文字を分類します。
-contains_japanese: 上記のいずれかの日本語関連文字を1つでも含むトークンを識別します。
-pure_japanese_script: ひらがな、カタカナ、漢字のみで構成されるトークンを識別します。
-貢献
-バグレポートや機能リクエストは、GitHubのIssuesを通じて提出してください。プルリクエストも歓迎します！
-ライセンス
+### 2. トークン重み付け（logitsバイアス）の例
+
+#### a) Transformers でのバイアス調整
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessorList
+import torch
+
+class TokenBiasLogitsProcessor:
+    def __init__(self, token_ids, bias_value):
+        self.token_ids = token_ids
+        self.bias_value = bias_value
+
+    def __call__(self, input_ids, scores):
+        for tid in self.token_ids:
+            scores[:, tid] += self.bias_value
+        return scores
+
+model = AutoModelForCausalLM.from_pretrained("your_japanese_model")
+tokenizer = AutoTokenizer.from_pretrained("your_japanese_model")
+
+# 例: "contains_japanese_..." ファイルから日本語トークンIDを読み込む
+with open("contains_japanese_myModel.txt", "r", encoding="utf-8") as f:
+    data = f.read()
+    # "japanese_ids = [123,456,789]" のように定義されていると仮定
+    line_clean = data.replace("japanese_ids = [", "").replace("]", "")
+    japanese_token_ids = [int(x) for x in line_clean.split(",")]
+
+bias_value = 2.0  # 日本語トークンに加算する値
+
+prompt = "今日は何をしましょうか？"
+input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+
+processor = LogitsProcessorList([
+    TokenBiasLogitsProcessor(japanese_token_ids, bias_value)
+])
+output = model.generate(
+    input_ids,
+    max_length=80,
+    do_sample=True,
+    temperature=0.7,
+    logits_processor=processor
+)
+
+result = tokenizer.decode(output[0], skip_special_tokens=True)
+print(result)
+```
+
+#### b) vLLM の OpenAI互換APIで logit_bias を設定
+
+```python
+# vllm/entrypoints/openai/api_server.py の一例
+@router.post("/v1/chat/completions")
+async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    # ...
+    # 例: 日本語トークンIDが [105714, 115668, ...] など
+    logit_bias_list = [105714, 115668, 104949]
+    logit_bias = {str(tid): 10 for tid in logit_bias_list}
+    request.logit_bias = logit_bias
+
+    generator = await handler.create_chat_completion(request, raw_request)
+    # ...
+```
+
+---
+
+## 分析例：Llama系モデル比較
+
+ここでは、**Qwen**は除外し、主に下記3つのモデルを例示します。  
+同じスクリプトでトークナイザーを分析し、「日本語トークンがどのくらいあるか」を比較しました。
+
+| モデル名                           | 語彙サイズ<br>(特殊トークン数) | 解析対象トークン数 | 日本語関連<br>(contains_japanese) | その比率(%) | 純粋日本語<br>(pure_japanese_script) | その比率(%) | 特殊文字<br>(special_char_pattern) | 未分類<br>(uncategorized) |
+|----------------------------------|--------------------------------|--------------------|-----------------------------------|------------|--------------------------------------|------------|------------------------------------|---------------------------|
+| **Llama-4-Scout-17B-16E**        | 200,000<br>(3)                 | 199,898            | 14,571                            | 7.29%      | 12,175                               | 6.09%      | 4,233                              | 48,152                    |
+| **Llama-3.3-70B-Instruct**       | 128,000<br>(3)                 | 127,898            | 5,728                             | 4.48%      | 4,605                                | 3.60%      | 3,752                              | 20,689                    |
+| **Mistral-Small-3.1-24B-2503**   | 131,072<br>(1,000)             | 130,072            | 5,623                             | 4.32%      | 4,632                                | 3.56%      | 2,762                              | 33,693                    |
+
+- **Llama-4-Scout**  
+  - 全体の約7.3%が「日本語関連トークン」で、純粋日本語トークンも6%強  
+  - “ひらがな/カタカナ/漢字”のパーツが他モデルより多い傾向  
+- **Llama-3.3-70B**  
+  - 約4.48%が日本語関連  
+  - 未分類は約2万とやや多め  
+- **Mistral-Small-3.1-24B**  
+  - 4.32%が日本語関連  
+  - 未分類が約3.3万と比較的多いが、Llama-4-Scoutほどの日本語量はカバーしていない
+
+**結論**：  
+Qwenを抜きに考えると、**Llama-4-Scout**が日本語トークン量では優位に見えます。  
+一方、MistralやLlama-3.3は単に日本語が少ないのではなく、「未分類」に入っている多言語や混合文字トークンもあるため、どの程度日本語を使いたいか次第で選択が変わります。
+
+---
+
+## 日本語トークン判定ロジック
+
+- `is_japanese_related_char`  
+  - 文字単位で、**ひらがな** (U+3040～309F)、**カタカナ（全角/半角）**、**CJK漢字** (U+4E00～U+9FFF, 拡張A～など)、**全角英数字**(FF10～FF19, FF21～... など)、日本語句読点 などを判定  
+- `can_be_japanese_utf8`  
+  - バイト単位で分析し、UTF-8で3〜4バイトの途中切れでも日本語文字に結合しうるかをチェック  
+- `is_complete_japanese_utf8`  
+  - 正確に3or4バイトで1文字の日本語を表すか判定（CJK拡張漢字などの4バイト対応）
+
+このような仕組みにより、BPEで一部だけ区切られたトークンも**「日本語文字になり得るもの」**として拾い上げます。
+
+---
+
+## 生成結果の例
+
+**プロンプト**: 「今日はとてもいい天気ですね」  
+- **日本語トークンに+2.0バイアス** → 生成例:
+  ```
+  本当に素晴らしい天気ですね。散歩やカフェに行くのも気持ちが良さそうです。
+  ```
+- **バイアスなし** → 生成例:
+  ```
+  Yes, the weather is quite nice. Would you like more details on the local climate?
+  ```
+
+日本語トークンに明確なバイアスを付けることで、英語や特殊文字を避け、日本語主体のテキストを生成しやすくなります。
+
+---
+
+## ライセンス
+
 MIT License
-Use code with caution.
 
-## Tests
-```
-[完全トークン検証] 文字: 'こ'
-  バイト列: b'\xe3\x81\x93'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[部分トークン検証] 文字: 'こ' (partial)
-  バイト列: b'\xe3\x81'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-.[多文字トークン検証] トークン: 'あA'
-  フルバイト列: b'\xe3\x81\x82A'
-  フルの結果（期待: False）: False
-  部分バイト列: b'\xe3\x81\x82'
-  期待値: True (部分で 'あ' が得られる)
-  実際値: True
-  アサーション成功
-
-.
-----------------------------------------------------------------------
-Ran 10 tests in 3.285s
-
-OK (skipped=4)
-(Llama4-Token-Editor-JP) root@e086bf4f0c6a:/workspace/sigrid/Llama4-Token-
-Editor-JP# python test.py^C
-(Llama4-Token-Editor-JP) root@e086bf4f0c6a:/workspace/sigrid/Llama4-Token-
-Editor-JP# vim test2.py
-(Llama4-Token-Editor-JP) root@e086bf4f0c6a:/workspace/sigrid/Llama4-Token-
-Editor-JP# vim test11.py
-(Llama4-Token-Editor-JP) root@e086bf4f0c6a:/workspace/sigrid/Llama4-Token-
-Editor-JP# python test11.py
-[setUpClass] 元の vocab_size: 200000
-モデル読み込みエラー: property 'vocab_size' of 'PreTrainedTokenizerFast' object has no setter
-ssss[is_japanese_related_char] テスト対象: 'あ'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_japanese_related_char] テスト対象: 'ア'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_japanese_related_char] テスト対象: '漢'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_japanese_related_char] テスト対象: '。'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_japanese_related_char] テスト対象: 'A'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-[is_japanese_related_char] テスト対象: '1'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-.[is_pure_japanese_script_char] テスト対象: 'あ'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_pure_japanese_script_char] テスト対象: 'ア'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_pure_japanese_script_char] テスト対象: '漢'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_pure_japanese_script_char] テスト対象: '。'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-[is_pure_japanese_script_char] テスト対象: 'A'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-.[is_special_char_pattern] テスト対象: '!!!'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_special_char_pattern] テスト対象: '@#$'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[is_special_char_pattern] テスト対象: 'abc'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-[is_special_char_pattern] テスト対象: 'あいう'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-[is_special_char_pattern] テスト対象: ''
-  期待値: False
-  実際値: False
-  アサーション成功
-
-.[ASCII多文字トークン検証] トークン: 'AB'
-  部分バイト列: b'A'
-  期待値: False (ASCII 'A' は日本語ではない)
-  実際値: False
-  アサーション成功
-
-.[完全トークン検証] 文字: 'あ'
-  バイト列: b'\xe3\x81\x82'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[部分トークン検証] 文字: 'あ' (partial: 末尾1バイト削除)
-  バイト列: b'\xe3\x81'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-[完全トークン検証] 文字: 'い'
-  バイト列: b'\xe3\x81\x84'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[部分トークン検証] 文字: 'い' (partial: 末尾1バイト削除)
-  バイト列: b'\xe3\x81'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-[完全トークン検証] 文字: 'う'
-  バイト列: b'\xe3\x81\x86'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[部分トークン検証] 文字: 'う' (partial: 末尾1バイト削除)
-  バイト列: b'\xe3\x81'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-[完全トークン検証] 文字: 'え'
-  バイト列: b'\xe3\x81\x88'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[部分トークン検証] 文字: 'え' (partial: 末尾1バイト削除)
-  バイト列: b'\xe3\x81'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-[完全トークン検証] 文字: 'お'
-  バイト列: b'\xe3\x81\x8a'
-  期待値: True
-  実際値: True
-  アサーション成功
-
-[部分トークン検証] 文字: 'お' (partial: 末尾1バイト削除)
-  バイト列: b'\xe3\x81'
-  期待値: False
-  実際値: False
-  アサーション成功
-
-.[多文字トークン検証] トークン: 'あい'
-  フルバイト列: b'\xe3\x81\x82\xe3\x81\x84'
-  期待値 (フル): False (全体は2文字)
-  実際値 (フル): False
-  部分バイト列: b'\xe3\x81\x82'
-  期待値 (部分): True (先頭で 'あ' が得られる)
-  実際値 (部分): True
-  アサーション成功
-
-.[単一文字検証] 文字: 'あ'
-  フルバイト列: b'\xe3\x81\x82'
-  期待値 (フル): True
-  実際値 (フル): True
-  部分バイト列（全体と同じ）: b'\xe3\x81\x82'
-  期待値 (部分): True
-  実際値 (部分): True
-  アサーション成功
-
-.
-----------------------------------------------------------------------
-Ran 11 tests in 3.499s
-
-OK (skipped=4)
-```
+バグ報告や機能提案は [GitHub Issues](https://github.com/sionic-ai/Llama4-Token-Editor-JP/issues) へお願いします。  
+PR（Pull Request）も大歓迎です！
