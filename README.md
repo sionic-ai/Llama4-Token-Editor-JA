@@ -29,8 +29,8 @@ Llama系を中心に、モデル内部のボキャブラリー（vocab）がど�
 ## インストール
 
 ```bash
-git clone https://github.com/sionic-ai/Llama4-Token-Editor-JP.git
-cd Llama4-Token-Editor-JP
+git clone https://github.com/sionic-ai/Llama4-Token-Editor-JA.git
+cd Llama4-Token-Editor-JA
 pip install -r requirements.txt
 ```
 
@@ -41,7 +41,7 @@ pip install -r requirements.txt
 ### 1. トークン解析の実行
 
 ```bash
-python token_analyzer_jp.py --model_id "モデルのパスまたはID"
+python token_analyzer_ja.py --model_id "モデルのパスまたはID"
 ```
 
 **主な引数**:
